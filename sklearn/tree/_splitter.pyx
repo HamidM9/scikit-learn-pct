@@ -62,6 +62,7 @@ cdef class Splitter:
     sparse and dense data, one split at a time.
     """
 
+
     def __cinit__(
         self,
         Criterion criterion,
@@ -70,7 +71,11 @@ cdef class Splitter:
         float64_t min_weight_leaf,
         object random_state,
         const int8_t[:] monotonic_cst,
+        object split_position="midpoint",
+        object tie_break="sklearn",
     ):
+        # new n.11 split position and tie break
+
         """
         Parameters
         ----------
@@ -109,20 +114,41 @@ cdef class Splitter:
         self.random_state = random_state
         self.monotonic_cst = monotonic_cst
         self.with_monotonic_cst = monotonic_cst is not None
+        # split_position # new n.11 split position and tie break
+        if split_position is None or split_position == "midpoint":
+            self.split_position_mode = 0
+        elif split_position == "clus_exact":
+            self.split_position_mode = 1
+        else:
+            raise ValueError(f"Unknown split_position={split_position!r}")
+
+        # tie_break
+        if tie_break is None or tie_break == "sklearn":
+            self.tie_break_mode = 0
+        elif tie_break == "clus":
+            self.tie_break_mode = 1
+        else:
+            raise ValueError(f"Unknown tie_break={tie_break!r}")
+
 
     def __getstate__(self):
         return {}
 
     def __setstate__(self, d):
         pass
-
+    # new n.11 split position and tie break
     def __reduce__(self):
+        cdef object sp = "midpoint" if self.split_position_mode == 0 else "clus_exact"
+        cdef object tb = "sklearn" if self.tie_break_mode == 0 else "clus"
         return (type(self), (self.criterion,
                              self.max_features,
                              self.min_samples_leaf,
                              self.min_weight_leaf,
                              self.random_state,
-                             self.monotonic_cst), self.__getstate__())
+                             self.monotonic_cst,
+                             sp,
+                             tb), self.__getstate__())
+
 
     cdef int init(
         self,
@@ -309,6 +335,8 @@ cdef inline int node_split_best(
     cdef float64_t impurity = parent_record.impurity
     cdef float64_t lower_bound = parent_record.lower_bound
     cdef float64_t upper_bound = parent_record.upper_bound
+    # new n.11 split position and tie break
+    cdef float64_t TIE_EPS = 1e-15
 
     cdef intp_t f_i = n_features
     cdef intp_t f_j
@@ -453,19 +481,69 @@ cdef inline int node_split_best(
 
                 current_proxy_improvement = criterion.proxy_impurity_improvement()
 
-                if current_proxy_improvement > best_proxy_improvement:
-                    best_proxy_improvement = current_proxy_improvement
-                    # sum of halves is used to avoid infinite value
-                    current_split.threshold = (
-                        feature_values[p_prev] / 2.0 + feature_values[p] / 2.0
-                    )
 
-                    if (
-                        current_split.threshold == feature_values[p] or
-                        current_split.threshold == INFINITY or
-                        current_split.threshold == -INFINITY
-                    ):
+
+                if (
+                    current_proxy_improvement > best_proxy_improvement + TIE_EPS
+                ):
+                    # strictly better
+                    best_proxy_improvement = current_proxy_improvement
+                    # ---- set threshold (your existing logic, or the new split_position switch) ----
+                    if splitter.split_position_mode == 0:
+                        current_split.threshold = (
+                                feature_values[p_prev] / 2.0 + feature_values[p] / 2.0
+                        )
+                        if (
+                                current_split.threshold == feature_values[p] or
+                                current_split.threshold == INFINITY or
+                                current_split.threshold == -INFINITY
+                        ):
+                            current_split.threshold = feature_values[p_prev]
+                    else:
                         current_split.threshold = feature_values[p_prev]
+                    # ------------------------------------------------------------------------------
+
+                    current_split.n_missing = n_missing
+
+                    if n_missing == 0:
+                        current_split.missing_go_to_left = n_left > n_right
+                    else:
+                        current_split.missing_go_to_left = missing_go_to_left
+
+                    best_split = current_split  # copy
+                elif (
+                    splitter.tie_break_mode == 1 and
+                    abs(current_proxy_improvement - best_proxy_improvement) <= TIE_EPS
+                ):
+                    # CLUS-style deterministic tie-breaking
+                    # Typical CLUS behavior: prefer the first encountered split in feature scan order.
+                    # In this loop, "first encountered" means: do NOT replace best_split on ties.
+                    # So: do nothing here.
+                    pass
+
+
+
+                    best_proxy_improvement = current_proxy_improvement
+                    # sum of halves is used to avoid infinite value # new n.11 split position and tie break
+                    if splitter.split_position_mode == 0:
+                        # midpoint (sklearn default)
+                        current_split.threshold = (
+                            feature_values[p_prev] / 2.0 + feature_values[p] / 2.0
+                        )
+
+                        if (
+                            current_split.threshold == feature_values[p] or
+                            current_split.threshold == INFINITY or
+                            current_split.threshold == -INFINITY
+                        ):
+                            current_split.threshold = feature_values[p_prev]
+                    else:
+                        # clus_exact: use observed value as the boundary.
+                        # With the sklearn partitioner convention (<= threshold goes left),
+                        # setting threshold = feature_values[p_prev] yields a split that matches:
+                        # "x > feature_values[p_prev]" for the right branch.
+                        current_split.threshold = feature_values[p_prev]
+
 
                     current_split.n_missing = n_missing
 
@@ -570,6 +648,7 @@ cdef inline int node_split_random(
     cdef intp_t[::1] features = splitter.features
     cdef intp_t[::1] constant_features = splitter.constant_features
     cdef intp_t n_features = splitter.n_features
+    cdef float64_t TIE_EPS = 1e-15
 
     cdef intp_t max_features = splitter.max_features
     cdef intp_t min_samples_leaf = splitter.min_samples_leaf
@@ -736,8 +815,9 @@ cdef inline int node_split_random(
             continue
 
         current_proxy_improvement = criterion.proxy_impurity_improvement()
+        # new n.11 split position and tie break
 
-        if current_proxy_improvement > best_proxy_improvement:
+        if current_proxy_improvement > best_proxy_improvement + 1e-15:
             current_split.n_missing = n_missing
 
             # if there are no missing values in the training data, during
@@ -750,7 +830,9 @@ cdef inline int node_split_random(
 
             best_proxy_improvement = current_proxy_improvement
             best_split = current_split  # copy
-
+        elif splitter.tie_break_mode == 1 and abs(current_proxy_improvement - best_proxy_improvement) <= 1e-15:
+            # CLUS: first wins -> do nothing
+            pass
     # Reorganize into samples[start:best.pos] + samples[best.pos:end]
     if best_split.pos < end:
         if current_split.feature != best_split.feature:

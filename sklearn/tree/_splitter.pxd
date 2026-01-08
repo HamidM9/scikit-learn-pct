@@ -59,6 +59,9 @@ cdef class Splitter:
     #   +1: monotonic increase
     cdef const int8_t[:] monotonic_cst
     cdef bint with_monotonic_cst
+    # new n.11 split position and tie break
+    cdef int8_t split_position_mode  # 0=midpoint, 1=clus_exact
+    cdef int8_t tie_break_mode  # 0=sklearn, 1=clus
     cdef const float64_t[:] sample_weight
 
     # The samples vector `samples` is maintained by the Splitter object such

@@ -29,6 +29,10 @@ cdef class Criterion:
     cdef float64_t weighted_n_left            # Weighted number of samples in the left node
     cdef float64_t weighted_n_right           # Weighted number of samples in the right node
     cdef float64_t weighted_n_missing         # Weighted number of samples that are missing
+    # new n.8 weighted svars
+
+    cdef float64_t[::1] _sq_sum_left_buf
+    cdef float64_t[::1] sq_sum_total_per_output
 
     # The criterion object is maintained such that left and right collected
     # statistics correspond to samples[start:pos] and samples[pos:end].
@@ -87,6 +91,10 @@ cdef class Criterion:
             float64_t sum_right,
     ) noexcept nogil
 
+
+
+
+
 cdef class ClassificationCriterion(Criterion):
     """Abstract criterion for classification."""
 
@@ -107,3 +115,7 @@ cdef class RegressionCriterion(Criterion):
     cdef float64_t[::1] sum_left     # Same as above, but for the left side of the split
     cdef float64_t[::1] sum_right    # Same as above, but for the right side of the split
     cdef float64_t[::1] sum_missing  # Same as above, but for missing values in X
+
+
+
+

@@ -41,6 +41,7 @@ from sklearn.utils import (
     compute_sample_weight,
     metadata_routing,
 )
+
 from sklearn.utils._param_validation import Hidden, Interval, RealNotInt, StrOptions
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import (
@@ -51,19 +52,21 @@ from sklearn.utils.validation import (
     check_is_fitted,
     validate_data,
 )
-
+# new n.4
 __all__ = [
     "DecisionTreeClassifier",
     "DecisionTreeRegressor",
     "ExtraTreeClassifier",
     "ExtraTreeRegressor",
+    "PCTRegressor",
+    "PCTClassifier",
 ]
 
 
 # =============================================================================
 # Types and constants
 # =============================================================================
-
+# new n.3 svars-svarsweighted
 DTYPE = _tree.DTYPE
 DOUBLE = _tree.DOUBLE
 
@@ -77,6 +80,9 @@ CRITERIA_REG = {
     "friedman_mse": _criterion.FriedmanMSE,
     "absolute_error": _criterion.MAE,
     "poisson": _criterion.Poisson,
+    "test_criterion": _criterion.TestCriterionRegression,
+    "svars": _criterion.SVarS,
+    "svars_weighted": _criterion.SVarSWeighted,
 }
 
 DENSE_SPLITTERS = {"best": _splitter.BestSplitter, "random": _splitter.RandomSplitter}
@@ -279,6 +285,8 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                         "necessary for Poisson regression."
                     )
 
+
+
         # Determine output settings
         n_samples, self.n_features_in_ = X.shape
         is_classification = is_classifier(self)
@@ -389,6 +397,44 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             # might be shared and modified concurrently during parallel fitting
             criterion = copy.deepcopy(criterion)
 
+        # CLUS: optional F-test gating (criteria that support it)
+        ftest_level = getattr(self, "ftest_level", 0)
+        if ftest_level and hasattr(criterion, "set_ftest_level"):
+            criterion.set_ftest_level(int(ftest_level))
+
+        # new n.12 ssl
+        # CLUS: MissingClusteringAttrHandling (used by PCT-style criteria only)
+        mch = getattr(self, "missing_clustering_attr_handling", None)
+        if mch is not None and hasattr(criterion, "set_missing_clustering_attr_handling"):
+            criterion.set_missing_clustering_attr_handling(mch)
+
+            # new n.10 target weights
+        tw = getattr(self, "target_weights", None)
+        if tw is not None:
+            tw = np.asarray(tw, dtype=np.float64)
+
+            if tw.ndim != 1:
+                raise ValueError(
+                    "target_weights must be 1D array-like of shape (n_outputs,)."
+                )
+
+            # At this point self.n_outputs_ is known.
+            if tw.size != self.n_outputs_:
+                raise ValueError(
+                    f"target_weights length {tw.size} does not match n_outputs={self.n_outputs_}."
+                )
+
+            if np.any(tw < 0):
+                raise ValueError("target_weights must be non-negative.")
+
+            # Preferred: expose a method in your Cython criterion, e.g. SVarS.set_target_weights(...)
+            if hasattr(criterion, "set_target_weights"):
+                criterion.set_target_weights(tw)
+            else:
+                # Fallback: set an attribute that your Cython criterion reads (you must implement it there).
+                setattr(criterion, "target_weights", tw)
+
+
         SPLITTERS = SPARSE_SPLITTERS if issparse(X) else DENSE_SPLITTERS
 
         splitter = self.splitter
@@ -439,8 +485,10 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 min_weight_leaf,
                 random_state,
                 monotonic_cst,
+                getattr(self, "split_position", "midpoint"),
+                getattr(self, "tie_break", "sklearn"),
             )
-
+        # new n.11 split position and tie break
         if is_classifier(self):
             self.tree_ = Tree(self.n_features_in_, self.n_classes_, self.n_outputs_)
         else:
@@ -1109,6 +1157,89 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
         tags.classifier_tags.multi_label = True
         tags.input_tags.allow_nan = allow_nan
         return tags
+# new n.6 introduce PCTClassifier
+class PCTClassifier(DecisionTreeClassifier):
+    """Predictive Clustering Tree classifier (prototype).
+
+    This estimator mirrors DecisionTreeClassifier but serves as the entry point
+    for CLUS-style extensions (multi-output, missing targets, weighted outputs,
+    and alternative heuristics).
+
+    Baseline (compat_mode="clus_v1"):
+    - Uses a standard classification impurity (default criterion="entropy" or "gini")
+      aligned with the frozen CLUS configuration.
+
+    Notes
+    -----
+    This is a minimal integration; CLUS-specific features (missing labels,
+    multi-label/hierarchical targets, SSL heuristics) will be implemented
+    incrementally.
+    """
+
+    _parameter_constraints = {
+        **DecisionTreeClassifier._parameter_constraints,
+        "compat_mode": [StrOptions({"clus_v1"})],
+        "target_weights": ["array-like", None],
+        "missing_target": [StrOptions({"error", "ignore"})],
+        "missing_target_policy": [StrOptions({"per_target", "sample_drop"})],
+        "leaf_model": [StrOptions({"distribution"})],
+        "pruning": [StrOptions({"none", "ccp"})],
+
+
+    }
+
+
+
+    def __init__(
+        self,
+        *,
+        criterion="entropy",   # choose per your CLUS frozen config
+        splitter="best",
+        max_depth=None,
+        min_samples_split=2,
+        min_samples_leaf=1,
+        min_weight_fraction_leaf=0.0,
+        max_features=None,
+        random_state=None,
+        max_leaf_nodes=None,
+        min_impurity_decrease=0.0,
+        class_weight=None,
+        ccp_alpha=0.0,
+        monotonic_cst=None,
+
+        compat_mode="clus_v1",
+        target_weights=None,
+        missing_target="error",
+        missing_target_policy="per_target",
+        leaf_model="distribution",
+        pruning="none",
+
+    ):
+        # Store CLUS params
+        self.compat_mode = compat_mode
+        self.target_weights = target_weights
+        self.missing_target = missing_target
+        self.missing_target_policy = missing_target_policy
+        self.leaf_model = leaf_model
+        self.pruning = pruning
+
+
+        super().__init__(
+            criterion=criterion,
+            splitter=splitter,
+            max_depth=max_depth,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            min_weight_fraction_leaf=min_weight_fraction_leaf,
+            max_features=max_features,
+            random_state=random_state,
+            max_leaf_nodes=max_leaf_nodes,
+            min_impurity_decrease=min_impurity_decrease,
+            class_weight=class_weight,
+            ccp_alpha=ccp_alpha,
+            monotonic_cst=monotonic_cst,
+        )
+
 
 
 class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
@@ -1334,11 +1465,11 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
     # "check_input" is used for optimisation and isn't something to be passed
     # around in a pipeline.
     __metadata_request__fit = {"check_input": metadata_routing.UNUSED}
-
+    #new n.2 add svars
     _parameter_constraints: dict = {
         **BaseDecisionTree._parameter_constraints,
         "criterion": [
-            StrOptions({"squared_error", "friedman_mse", "absolute_error", "poisson"}),
+            StrOptions({"squared_error", "friedman_mse", "absolute_error", "poisson", "test_criterion", "svars", "svars_weighted"}),
             Hidden(Criterion),
         ],
     }
@@ -1451,6 +1582,315 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
         }
         tags.input_tags.allow_nan = allow_nan
         return tags
+
+class PCTRegressor(DecisionTreeRegressor):
+    """Predictive Clustering Tree regressor (prototype).
+
+    This estimator is identical to DecisionTreeRegressor in training pipeline,
+    but uses a CLUS-style split heuristic by default:
+
+    - criterion="svars": sum of variances across outputs (no averaging by n_outputs).
+    """
+
+    _parameter_constraints: dict = {
+        **DecisionTreeRegressor._parameter_constraints,
+        "compat_mode": [StrOptions({"clus_v1"})],
+        "target_weights": ["array-like", None],
+        "missing_target": [StrOptions({"error", "ignore"})],
+        "missing_target_policy": [StrOptions({"per_target", "sample_drop"})],
+        "leaf_model": [StrOptions({"mean", "linear"})],
+        "pruning": [StrOptions({"none", "ccp"})],
+        "split_position": [StrOptions({"midpoint", "clus_exact"})],
+        "tie_break": [StrOptions({"sklearn", "clus"})],
+        "missing_clustering_attr_handling": [StrOptions({"ignore", "estimate_from_parent_node", "estimate_from_training_set"})],
+        "missing_target_attr_handling": [StrOptions({"zero", "default_model", "parent_node"})],
+        "ftest": [Interval(Real, 0.0, 1.0, closed="both"), "array-like", None],
+
+    } # new n.11 split position and tie break
+
+
+
+
+    def __init__(
+        self,
+        *,
+        criterion="svars",
+        splitter="best",
+        split_position="midpoint",  # new n.11 split position and tie break
+        tie_break="sklearn",
+        max_depth=None,
+        min_samples_split=2,
+        min_samples_leaf=1,
+        min_weight_fraction_leaf=0.0,
+        max_features=None,
+        random_state=None,
+        max_leaf_nodes=None,
+        min_impurity_decrease=0.0,
+        ccp_alpha=0.0,
+        monotonic_cst=None,
+
+        # CLUS-compat args
+        missing_clustering_attr_handling="estimate_from_parent_node",
+        compat_mode="clus_v1",
+        target_weights=None,
+        missing_target="error",
+        missing_target_policy="per_target",
+        leaf_model="mean",
+        pruning="none",
+        ftest=1.0,
+        missing_target_attr_handling="default_model"
+    ):
+        # 1) Store CLUS-specific parameters (required for sklearn estimator API)
+        self.compat_mode = compat_mode
+        self.target_weights = target_weights
+        self.missing_target = missing_target
+        self.missing_target_policy = missing_target_policy
+        self.leaf_model = leaf_model
+        self.pruning = pruning
+        self.split_position = split_position  # new n.11 split position and tie break
+        self.tie_break = tie_break
+        self.missing_clustering_attr_handling = missing_clustering_attr_handling
+        self.ftest = ftest
+        self.missing_target_attr_handling = missing_target_attr_handling
+
+        # 2) Delegate standard tree params to DecisionTreeRegressor
+        super().__init__(
+            criterion=criterion,
+            splitter=splitter,
+            max_depth=max_depth,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            min_weight_fraction_leaf=min_weight_fraction_leaf,
+            max_features=max_features,
+            random_state=random_state,
+            max_leaf_nodes=max_leaf_nodes,
+            min_impurity_decrease=min_impurity_decrease,
+            ccp_alpha=ccp_alpha,
+            monotonic_cst=monotonic_cst,
+        )
+
+    def _pct_prepare_targets(self, y):
+        """Prepare/transform y for CLUS-style weighted multi-target variance.
+
+        Option A: encode target weights via a preprocessing transform on y
+        so that existing unweighted variance-based criteria behave as if
+        targets were weighted.
+
+        Returns
+        -------
+        y_trans : ndarray
+            Transformed y used for fitting.
+        """
+        y_arr = np.asarray(y, dtype=float)
+
+        # Reset stored parameters each fit
+        self._pct_sqrt_w_ = None
+
+        if self.target_weights is None:
+            return y_arr
+
+        w = np.asarray(self.target_weights, dtype=float)
+        if w.ndim != 1:
+            raise ValueError("target_weights must be 1D array-like of shape (n_outputs,).")
+        if np.any(w < 0):
+            raise ValueError("target_weights must be non-negative.")
+
+        # Ensure 2D for consistent handling
+        if y_arr.ndim == 1:
+            if w.size != 1:
+                raise ValueError("For 1D y, target_weights must have length 1.")
+            sqrt_w = np.sqrt(w)
+            self._pct_sqrt_w_ = sqrt_w
+            return y_arr * sqrt_w[0]
+
+        n_outputs = y_arr.shape[1]
+        if w.size != n_outputs:
+            raise ValueError(f"target_weights length {w.size} does not match n_outputs={n_outputs}.")
+
+        sqrt_w = np.sqrt(w)
+        self._pct_sqrt_w_ = sqrt_w
+
+        # Broadcast multiply columns: (n_samples, n_outputs) * (n_outputs,)
+        return y_arr * sqrt_w
+# new n.11 fit and pred
+
+    def fit(self, X, y, sample_weight=None, check_input=True):
+
+        from sklearn.utils.validation import check_array
+
+        # ---- existing ftest mapping (keep your current lines) ----
+        self.ftest_level = self._resolve_ftest_level()
+
+        # ---- Missing target handling (CLUS MissingTargetAttrHandling) ----
+        y_arr = np.asarray(y)
+        if y_arr.ndim == 1:
+            y_arr = y_arr.reshape(-1, 1)
+
+        # Mask of missing targets in the ORIGINAL y (True where missing)
+        missing_mask = np.isnan(y_arr)
+
+        # Default model per target = mean of observed values (ignoring NaN)
+        # If a target is entirely missing, default to 0.0 (safe fallback)
+        default_model = np.zeros(y_arr.shape[1], dtype=float)
+        for k in range(y_arr.shape[1]):
+            col = y_arr[:, k]
+            obs = col[~np.isnan(col)]
+            default_model[k] = float(np.mean(obs)) if obs.size else 0.0
+        self._pct_default_model_ = default_model
+
+        # For training the tree, we must provide finite y values.
+        # Impute missing with default model means (neutral choice for training).
+        y_train = y_arr.copy()
+        for k in range(y_train.shape[1]):
+            y_train[missing_mask[:, k], k] = default_model[k]
+
+        # Fit the actual tree using the imputed targets.
+        super().fit(X, y_train, sample_weight=sample_weight, check_input=check_input)
+
+        # After fitting, build per-node “has observed target k?” flags using ORIGINAL missingness.
+        # We compute observed counts for each node and each target based on training paths.
+
+        # Decision path matrix: shape (n_samples, n_nodes), CSR sparse
+        path = self.decision_path(X, check_input=check_input)
+
+        n_nodes = self.tree_.node_count
+        n_outputs = y_train.shape[1]
+
+        # observed_mask: float array to allow sparse dot
+        # For each target k: 1 where observed, 0 where missing
+        obs_flags = (~missing_mask).astype(np.float64)  # (n_samples, n_outputs)
+
+        # node_obs_counts[k][node] = number of observed samples for target k that pass through node
+        node_obs_counts = np.zeros((n_nodes, n_outputs), dtype=np.int64)
+        for k in range(n_outputs):
+            # path.T @ obs_flags[:, k] gives counts per node
+            counts = path.T.dot(obs_flags[:, k])
+            node_obs_counts[:, k] = np.asarray(counts).ravel().astype(np.int64)
+
+        self._pct_node_has_obs_ = node_obs_counts > 0
+
+        # Build parent pointers for fast “parent node fallback”
+        children_left = self.tree_.children_left
+        children_right = self.tree_.children_right
+        parent = np.full(n_nodes, -1, dtype=np.int64)
+        for p in range(n_nodes):
+            cl = children_left[p]
+            cr = children_right[p]
+            if cl != -1:
+                parent[cl] = p
+            if cr != -1:
+                parent[cr] = p
+        self._pct_parent_ = parent
+
+        return self
+
+    def predict(self, X, check_input=True):
+        import numpy as np
+
+        pred = super().predict(X, check_input=check_input)
+        if pred.ndim == 1:
+            pred = pred.reshape(-1, 1)
+
+        # If no missing-target metadata exists, return base prediction
+        node_has_obs = getattr(self, "_pct_node_has_obs_", None)
+        if node_has_obs is None:
+            return pred if pred.shape[1] > 1 else pred.ravel()
+
+        policy = self.missing_target_attr_handling
+        default_model = self._pct_default_model_
+        parent = self._pct_parent_
+
+        # Find leaf node for each sample
+        leaf_ids = self.apply(X, check_input=check_input)
+
+        # For each sample and target, if leaf has no observed values -> apply policy
+        out = pred.copy()
+        n_samples, n_outputs = out.shape
+
+        if policy == "zero":
+            for i in range(n_samples):
+                leaf = leaf_ids[i]
+                for k in range(n_outputs):
+                    if not node_has_obs[leaf, k]:
+                        out[i, k] = 0.0
+
+        elif policy == "default_model":
+            for i in range(n_samples):
+                leaf = leaf_ids[i]
+                for k in range(n_outputs):
+                    if not node_has_obs[leaf, k]:
+                        out[i, k] = default_model[k]
+
+        elif policy == "parent_node":
+            # Walk up the tree until we find an ancestor where the target is observed
+            # If we reach root and still missing, fall back to default_model
+            tree_value = self.tree_.value[:, :, 0]  # (n_nodes, n_outputs)
+            for i in range(n_samples):
+                node = leaf_ids[i]
+                for k in range(n_outputs):
+                    if node_has_obs[node, k]:
+                        continue
+                    cur = node
+                    while cur != -1 and not node_has_obs[cur, k]:
+                        cur = parent[cur]
+                    if cur == -1:
+                        out[i, k] = default_model[k]
+                    else:
+                        out[i, k] = tree_value[cur, k]
+        else:
+            raise ValueError(
+                "missing_target_attr_handling must be one of: "
+                "'zero', 'default_model', 'parent_node'"
+            )
+
+        return out if out.shape[1] > 1 else out.ravel()
+
+    def _resolve_ftest_level(self):
+        """Map CLUS manual ftest value r in [0,1] to internal table level.
+
+        Internal levels:
+          0: disabled (CLUS manual ftest=1.0)
+          1: 0.1
+          2: 0.05
+          3: 0.01
+          4: 0.005
+          5: 0.001
+        """
+        ftest = self.ftest
+
+        if ftest is None:
+            return 0
+
+        # List/array: not implemented yet (manual says optimize on PruneSet).
+        # We will implement optimization in a later step.
+        if isinstance(ftest, (list, tuple, np.ndarray)):
+            raise ValueError(
+                "ftest as a list/array is not implemented yet. "
+                "For now pass a single float in [0,1], e.g. 1.0, 0.05, 0.001."
+            )
+
+        r = float(ftest)
+
+        # Manual default: 1.0 => effectively no gating
+        if r >= 1.0:
+            return 0
+
+        # Supported CLUS table levels
+        if np.isclose(r, 0.1):
+            return 1
+        if np.isclose(r, 0.05):
+            return 2
+        if np.isclose(r, 0.01):
+            return 3
+        if np.isclose(r, 0.005):
+            return 4
+        if np.isclose(r, 0.001):
+            return 5
+
+        raise ValueError(
+            "Unsupported ftest value. Supported values are: "
+            "1.0 (disable), 0.1, 0.05, 0.01, 0.005, 0.001."
+        )
 
 
 class ExtraTreeClassifier(DecisionTreeClassifier):
