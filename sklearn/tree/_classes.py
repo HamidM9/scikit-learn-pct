@@ -74,6 +74,8 @@ CRITERIA_CLF = {
     "gini": _criterion.Gini,
     "log_loss": _criterion.Entropy,
     "entropy": _criterion.Entropy,
+    "clus_entropy": _criterion.ClusEntropy,
+    "clus_gini": _criterion.ClusGini,
 }
 CRITERIA_REG = {
     "squared_error": _criterion.MSE,
@@ -1159,44 +1161,24 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
         return tags
 # new n.6 introduce PCTClassifier
 class PCTClassifier(DecisionTreeClassifier):
-    """Predictive Clustering Tree classifier (prototype).
-
-    This estimator mirrors DecisionTreeClassifier but serves as the entry point
-    for CLUS-style extensions (multi-output, missing targets, weighted outputs,
-    and alternative heuristics).
-
-    Baseline (compat_mode="clus_v1"):
-    - Uses a standard classification impurity (default criterion="entropy" or "gini")
-      aligned with the frozen CLUS configuration.
-
-    Notes
-    -----
-    This is a minimal integration; CLUS-specific features (missing labels,
-    multi-label/hierarchical targets, SSL heuristics) will be implemented
-    incrementally.
-    """
-    #start commit
-    #not yet
+    """Predictive Clustering Tree classifier (CLUS-compatible prototype)."""
 
     _parameter_constraints = {
         **DecisionTreeClassifier._parameter_constraints,
         "compat_mode": [StrOptions({"clus_v1"})],
         "target_weights": ["array-like", None],
-        "missing_target": [StrOptions({"error", "ignore"})],
-        "missing_target_policy": [StrOptions({"per_target", "sample_drop"})],
-        "leaf_model": [StrOptions({"distribution"})],
-        "pruning": [StrOptions({"none", "ccp"})],
-
-
+        "missing_target_attr_handling": [StrOptions({"error", "zero", "default_model", "parent_node"})],
+        "split_position": [StrOptions({"midpoint", "clus_exact"})],
+        "tie_break": [StrOptions({"sklearn", "clus"})],
     }
-
-
 
     def __init__(
         self,
         *,
-        criterion="entropy",   # choose per your CLUS frozen config
+        criterion="clus_entropy",
         splitter="best",
+        split_position="midpoint",
+        tie_break="sklearn",
         max_depth=None,
         min_samples_split=2,
         min_samples_leaf=1,
@@ -1208,23 +1190,15 @@ class PCTClassifier(DecisionTreeClassifier):
         class_weight=None,
         ccp_alpha=0.0,
         monotonic_cst=None,
-
         compat_mode="clus_v1",
         target_weights=None,
-        missing_target="error",
-        missing_target_policy="per_target",
-        leaf_model="distribution",
-        pruning="none",
-
+        missing_target_attr_handling="error",
     ):
-        # Store CLUS params
         self.compat_mode = compat_mode
         self.target_weights = target_weights
-        self.missing_target = missing_target
-        self.missing_target_policy = missing_target_policy
-        self.leaf_model = leaf_model
-        self.pruning = pruning
-
+        self.missing_target_attr_handling = missing_target_attr_handling
+        self.split_position = split_position
+        self.tie_break = tie_break
 
         super().__init__(
             criterion=criterion,
@@ -1242,6 +1216,172 @@ class PCTClassifier(DecisionTreeClassifier):
             monotonic_cst=monotonic_cst,
         )
 
+    def fit(self, X, y, sample_weight=None, check_input=True):
+        import numpy as np
+
+        y_arr = np.asarray(y)
+
+        # We treat missing labels as np.nan for numeric arrays.
+        # If your pipeline uses -1 sentinel, convert it to np.nan upstream (recommended).
+        if y_arr.ndim == 1:
+            y_arr = y_arr.reshape(-1, 1)
+
+        # mask missing in original label space
+        missing_mask = np.isnan(y_arr) if np.issubdtype(y_arr.dtype, np.floating) else np.zeros_like(y_arr, dtype=bool)
+
+        if self.missing_target_attr_handling == "error" and np.any(missing_mask):
+            raise ValueError("Missing targets found but missing_target_attr_handling='error'.")
+
+        # default model = per-target majority class among observed labels
+        default_model = np.zeros(y_arr.shape[1], dtype=int)
+        for k in range(y_arr.shape[1]):
+            col = y_arr[:, k]
+            obs = col[~missing_mask[:, k]]
+            if obs.size == 0:
+                default_model[k] = 0
+            else:
+                # majority (ties resolved by smallest label after sorting)
+                vals, cnts = np.unique(obs.astype(int), return_counts=True)
+                default_model[k] = int(vals[np.argmax(cnts)])
+        self._pct_default_model_ = default_model
+        self._pct_missing_mask_ = missing_mask
+
+        # training y must be finite integers; impute missing with default_model
+        y_train = y_arr.copy()
+        for k in range(y_train.shape[1]):
+            if np.any(missing_mask[:, k]):
+                y_train[missing_mask[:, k], k] = default_model[k]
+        y_train = y_train.astype(int)
+
+        super().fit(X, y_train if y_train.shape[1] > 1 else y_train.ravel(),
+                    sample_weight=sample_weight, check_input=check_input)
+
+        # build per-node "has observed for target k" metadata using ORIGINAL mask
+        path = self.decision_path(X, check_input=check_input)  # CSR (n_samples, n_nodes)
+        n_nodes = self.tree_.node_count
+        n_outputs = y_train.shape[1]
+
+        obs_flags = (~missing_mask).astype(np.float64)  # (n_samples, n_outputs)
+        node_obs_counts = np.zeros((n_nodes, n_outputs), dtype=np.int64)
+        for k in range(n_outputs):
+            counts = path.T.dot(obs_flags[:, k])
+            node_obs_counts[:, k] = np.asarray(counts).ravel().astype(np.int64)
+        self._pct_node_has_obs_ = node_obs_counts > 0
+
+        # parent pointers for parent_node fallback
+        children_left = self.tree_.children_left
+        children_right = self.tree_.children_right
+        parent = np.full(n_nodes, -1, dtype=np.int64)
+        for p in range(n_nodes):
+            cl = children_left[p]
+            cr = children_right[p]
+            if cl != -1:
+                parent[cl] = p
+            if cr != -1:
+                parent[cr] = p
+        self._pct_parent_ = parent
+
+        return self
+
+    def _apply_missing_policy_to_proba(self, X, proba, check_input=True):
+        """Adjust predicted probabilities for targets where leaf has no observed labels."""
+        import numpy as np
+
+        node_has_obs = getattr(self, "_pct_node_has_obs_", None)
+        if node_has_obs is None:
+            return proba
+
+        policy = self.missing_target_attr_handling
+        default_model = self._pct_default_model_
+        parent = self._pct_parent_
+
+        leaf_ids = self.apply(X, check_input=check_input)
+        n_samples = X.shape[0]
+
+        # multi-output: proba is list of arrays
+        if self.n_outputs_ > 1:
+            out = [p.copy() for p in proba]
+            for k in range(self.n_outputs_):
+                pk = out[k]
+                for i in range(n_samples):
+                    leaf = leaf_ids[i]
+                    if node_has_obs[leaf, k]:
+                        continue
+                    if policy == "zero":
+                        pk[i, :] = 0.0
+                        pk[i, 0] = 1.0  # class 0
+                    elif policy == "default_model":
+                        pk[i, :] = 0.0
+                        cls = int(default_model[k])
+                        if cls < pk.shape[1]:
+                            pk[i, cls] = 1.0
+                        else:
+                            pk[i, 0] = 1.0
+                    elif policy == "parent_node":
+                        cur = leaf
+                        while cur != -1 and not node_has_obs[cur, k]:
+                            cur = parent[cur]
+                        if cur == -1:
+                            pk[i, :] = 0.0
+                            cls = int(default_model[k])
+                            pk[i, cls if cls < pk.shape[1] else 0] = 1.0
+                        else:
+                            # use stored node value distribution
+                            # tree_.value for classifier: shape (n_nodes, n_outputs, max_n_classes)
+                            dist = self.tree_.value[cur, k, : pk.shape[1]]
+                            s = dist.sum()
+                            if s <= 0:
+                                pk[i, :] = 0.0
+                                pk[i, 0] = 1.0
+                            else:
+                                pk[i, :] = dist / s
+                    else:
+                        # 'error' should have been handled during fit
+                        pk[i, :] = pk[i, :]
+            return out
+
+        # single output: proba is (n_samples, n_classes)
+        out = proba.copy()
+        for i in range(n_samples):
+            leaf = leaf_ids[i]
+            if node_has_obs[leaf, 0]:
+                continue
+            if policy == "zero":
+                out[i, :] = 0.0
+                out[i, 0] = 1.0
+            elif policy == "default_model":
+                out[i, :] = 0.0
+                cls = int(default_model[0])
+                out[i, cls if cls < out.shape[1] else 0] = 1.0
+            elif policy == "parent_node":
+                cur = leaf
+                while cur != -1 and not node_has_obs[cur, 0]:
+                    cur = parent[cur]
+                if cur == -1:
+                    out[i, :] = 0.0
+                    cls = int(default_model[0])
+                    out[i, cls if cls < out.shape[1] else 0] = 1.0
+                else:
+                    dist = self.tree_.value[cur, 0, : out.shape[1]]
+                    s = dist.sum()
+                    out[i, :] = (dist / s) if s > 0 else np.eye(out.shape[1])[0]
+        return out
+
+    def predict_proba(self, X, check_input=True):
+        proba = super().predict_proba(X, check_input=check_input)
+        return self._apply_missing_policy_to_proba(X, proba, check_input=check_input)
+
+    def predict(self, X, check_input=True):
+        proba = self.predict_proba(X, check_input=check_input)
+        if self.n_outputs_ == 1:
+            return self.classes_.take(proba.argmax(axis=1), axis=0)
+        # multi-output
+        import numpy as np
+        n_samples = X.shape[0]
+        preds = np.zeros((n_samples, self.n_outputs_), dtype=self.classes_[0].dtype)
+        for k in range(self.n_outputs_):
+            preds[:, k] = self.classes_[k].take(proba[k].argmax(axis=1), axis=0)
+        return preds
 
 
 class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):

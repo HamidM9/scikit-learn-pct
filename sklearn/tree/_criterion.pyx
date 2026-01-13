@@ -5,6 +5,7 @@ from libc.math cimport NAN
 from libc.string cimport memcpy
 from libc.string cimport memset
 from libc.math cimport INFINITY
+from libc.stdlib cimport malloc, free
 
 import numpy as np
 cimport numpy as cnp
@@ -765,6 +766,179 @@ cdef class Gini(ClassificationCriterion):
 
         impurity_left[0] = gini_left / self.n_outputs
         impurity_right[0] = gini_right / self.n_outputs
+
+
+
+# --- add near existing Entropy/Gini classes in sklearn/tree/_criterion.pyx ---
+
+cdef class ClusEntropy(ClassificationCriterion):
+    """CLUS-style entropy: sum over outputs (optionally weighted), not averaged."""
+
+    cdef float64_t* _tw
+    cdef bint _has_tw
+
+    def __cinit__(self):
+        self._tw = NULL
+        self._has_tw = False
+
+    def __dealloc__(self):
+        if self._tw != NULL:
+            free(self._tw)
+            self._tw = NULL
+
+    def set_target_weights(self, cnp.ndarray[float64_t, ndim=1] tw):
+        """Copy weights into a C array to allow nogil access."""
+
+        cdef Py_ssize_t i
+        if tw.shape[0] != self.n_outputs:
+            raise ValueError("target_weights length must match n_outputs")
+        if self._tw != NULL:
+            free(self._tw)
+            self._tw = NULL
+        self._tw = <float64_t*> malloc(self.n_outputs * sizeof(float64_t))
+        if self._tw == NULL:
+            raise MemoryError()
+        for i in range(self.n_outputs):
+            self._tw[i] = tw[i]
+        self._has_tw = True
+
+    cdef inline float64_t _w(self, intp_t o) noexcept nogil:
+        if self._has_tw:
+            return self._tw[o]
+        return 1.0
+
+    cdef float64_t node_impurity(self) noexcept nogil:
+        cdef float64_t impur = 0.0
+        cdef float64_t count_k
+        cdef float64_t w
+        cdef intp_t k, c, o
+
+        for o in range(self.n_outputs):
+            w = self._w(o)
+            if w <= 0.0:
+                continue
+            for c in range(self.n_classes[o]):
+                count_k = self.sum_total[o][c]
+                if count_k > 0.0:
+                    count_k /= self.weighted_n_node_samples
+                    impur -= w * count_k * log(count_k)
+        return impur
+
+    cdef void children_impurity(self, float64_t* impurity_left,
+                               float64_t* impurity_right) noexcept nogil:
+        cdef float64_t left = 0.0
+        cdef float64_t right = 0.0
+        cdef float64_t count_k
+        cdef float64_t w
+        cdef intp_t k, c, o
+
+        # left
+        for o in range(self.n_outputs):
+            w = self._w(o)
+            if w <= 0.0:
+                continue
+            for c in range(self.n_classes[o]):
+                count_k = self.sum_left[o][c]
+                if count_k > 0.0:
+                    count_k /= self.weighted_n_left
+                    left -= w * count_k * log(count_k)
+
+        # right
+        for o in range(self.n_outputs):
+            w = self._w(o)
+            if w <= 0.0:
+                continue
+            for c in range(self.n_classes[o]):
+                count_k = self.sum_right[o][c]
+                if count_k > 0.0:
+                    count_k /= self.weighted_n_right
+                    right -= w * count_k * log(count_k)
+
+        impurity_left[0] = left
+        impurity_right[0] = right
+
+
+cdef class ClusGini(ClassificationCriterion):
+    """CLUS-style gini: sum over outputs (optionally weighted), not averaged."""
+
+    cdef float64_t* _tw
+    cdef bint _has_tw
+
+    def __cinit__(self):
+        self._tw = NULL
+        self._has_tw = False
+
+    def __dealloc__(self):
+        if self._tw != NULL:
+            free(self._tw)
+            self._tw = NULL
+
+    def set_target_weights(self, cnp.ndarray[float64_t, ndim=1] tw):
+
+        cdef Py_ssize_t i
+        if tw.shape[0] != self.n_outputs:
+            raise ValueError("target_weights length must match n_outputs")
+        if self._tw != NULL:
+            free(self._tw)
+            self._tw = NULL
+        self._tw = <float64_t*> malloc(self.n_outputs * sizeof(float64_t))
+        if self._tw == NULL:
+            raise MemoryError()
+        for i in range(self.n_outputs):
+            self._tw[i] = tw[i]
+        self._has_tw = True
+
+    cdef inline float64_t _w(self, intp_t o) noexcept nogil:
+        if self._has_tw:
+            return self._tw[o]
+        return 1.0
+
+    cdef float64_t node_impurity(self) noexcept nogil:
+        cdef float64_t impur = 0.0
+        cdef float64_t sq_count
+        cdef float64_t w
+        cdef intp_t c, o
+
+        for o in range(self.n_outputs):
+            w = self._w(o)
+            if w <= 0.0:
+                continue
+            sq_count = 0.0
+            for c in range(self.n_classes[o]):
+                sq_count += (self.sum_total[o][c] / self.weighted_n_node_samples) ** 2
+            impur += w * (1.0 - sq_count)
+        return impur
+
+    cdef void children_impurity(self, float64_t* impurity_left,
+                               float64_t* impurity_right) noexcept nogil:
+        cdef float64_t left = 0.0
+        cdef float64_t right = 0.0
+        cdef float64_t sq_count
+        cdef float64_t w
+        cdef intp_t c, o
+
+        for o in range(self.n_outputs):
+            w = self._w(o)
+            if w <= 0.0:
+                continue
+            sq_count = 0.0
+            for c in range(self.n_classes[o]):
+                sq_count += (self.sum_left[o][c] / self.weighted_n_left) ** 2
+            left += w * (1.0 - sq_count)
+
+        for o in range(self.n_outputs):
+            w = self._w(o)
+            if w <= 0.0:
+                continue
+            sq_count = 0.0
+            for c in range(self.n_classes[o]):
+                sq_count += (self.sum_right[o][c] / self.weighted_n_right) ** 2
+            right += w * (1.0 - sq_count)
+
+        impurity_left[0] = left
+        impurity_right[0] = right
+
+
 
 
 cdef inline void _move_sums_regression(
