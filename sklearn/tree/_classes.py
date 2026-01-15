@@ -1165,6 +1165,7 @@ class PCTClassifier(DecisionTreeClassifier):
 
     _parameter_constraints = {
         **DecisionTreeClassifier._parameter_constraints,
+        "criterion": [StrOptions({"gini", "entropy", "log_loss", "clus_entropy", "clus_gini"})],
         "compat_mode": [StrOptions({"clus_v1"})],
         "target_weights": ["array-like", None],
         "missing_target_attr_handling": [StrOptions({"error", "zero", "default_model", "parent_node"})],
