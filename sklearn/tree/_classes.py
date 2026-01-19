@@ -76,6 +76,7 @@ CRITERIA_CLF = {
     "entropy": _criterion.Entropy,
     "clus_entropy": _criterion.ClusEntropy,
     "clus_gini": _criterion.ClusGini,
+    "clus_modified_entropy": _criterion.ClusModifiedEntropy,
 }
 CRITERIA_REG = {
     "squared_error": _criterion.MSE,
@@ -435,6 +436,19 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             else:
                 # Fallback: set an attribute that your Cython criterion reads (you must implement it there).
                 setattr(criterion, "target_weights", tw)
+
+            if is_classifier(self):
+                # We assume missing targets are encoded as np.nan in y_train.
+                # Compute BEFORE you impute/replace missing labels for the internal tree builder.
+                if hasattr(self, "_y_missing_mask_"):
+                    # If PCTClassifier prepared it (recommended), use it.
+                    y_missing_mask = self._y_missing_mask_
+                else:
+                    # Fallback: derive from the training y passed to fit
+                    y_missing_mask = np.isnan(y).astype(np.uint8)
+
+                if hasattr(criterion, "set_y_missing_mask"):
+                    criterion.set_y_missing_mask(y_missing_mask)
 
 
         SPLITTERS = SPARSE_SPLITTERS if issparse(X) else DENSE_SPLITTERS
@@ -1165,7 +1179,7 @@ class PCTClassifier(DecisionTreeClassifier):
 
     _parameter_constraints = {
         **DecisionTreeClassifier._parameter_constraints,
-        "criterion": [StrOptions({"gini", "entropy", "log_loss", "clus_entropy", "clus_gini"})],
+        "criterion": [StrOptions({"gini", "entropy", "log_loss", "clus_entropy", "clus_gini", "clus_modified_entropy"})],
         "compat_mode": [StrOptions({"clus_v1"})],
         "target_weights": ["array-like", None],
         "missing_target_attr_handling": [StrOptions({"error", "zero", "default_model", "parent_node"})],
@@ -1176,7 +1190,7 @@ class PCTClassifier(DecisionTreeClassifier):
     def __init__(
         self,
         *,
-        criterion="clus_entropy",
+        criterion="clus_modified_entropy",
         splitter="best",
         split_position="midpoint",
         tie_break="sklearn",
