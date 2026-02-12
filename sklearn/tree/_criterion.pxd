@@ -3,6 +3,7 @@
 
 # See _criterion.pyx for implementation details.
 from sklearn.utils._typedefs cimport float64_t, int8_t, intp_t
+cimport numpy as cnp
 
 
 cdef class Criterion:
@@ -105,6 +106,9 @@ cdef class ClassificationCriterion(Criterion):
     cdef float64_t[:, ::1] sum_left     # Same as above, but for the left side of the split
     cdef float64_t[:, ::1] sum_right    # Same as above, but for the right side of the split
     cdef float64_t[:, ::1] sum_missing  # Same as above, but for missing values in X
+    cdef cnp.uint8_t[:, ::1] _y_missing
+    cdef bint _has_y_missing
+    cpdef set_y_missing_mask(self, object y_missing)
 
 cdef class RegressionCriterion(Criterion):
     """Abstract regression criterion."""

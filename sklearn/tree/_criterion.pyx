@@ -325,6 +325,7 @@ cdef class ClassificationCriterion(Criterion):
         self.weighted_n_missing = 0.0
 
         self.n_classes = np.empty(n_outputs, dtype=np.intp)
+        self._has_y_missing = False
 
         cdef intp_t k = 0
         cdef intp_t max_n_classes = 0
@@ -408,7 +409,10 @@ cdef class ClassificationCriterion(Criterion):
                 w = sample_weight[i]
 
             # Count weighted class frequency for each target
+            # Count weighted class frequency for each target
             for k in range(self.n_outputs):
+                if self._has_y_missing and self._y_missing[i, k]:
+                    continue
                 c = <intp_t> self.y[i, k]
                 self.sum_total[k, c] += w
 
@@ -417,6 +421,17 @@ cdef class ClassificationCriterion(Criterion):
         # Reset to pos=start
         self.reset()
         return 0
+
+
+    cpdef set_y_missing_mask(self, object y_missing):
+        """
+        y_missing: array-like shape (n_samples, n_outputs), True/1 where target is missing.
+        IMPORTANT: indices are in the ORIGINAL sample index space.
+        """
+        cdef cnp.ndarray arr = np.asarray(y_missing, dtype=np.uint8, order="C")
+        self._y_missing = arr
+        self._has_y_missing = True
+
 
     cdef void init_sum_missing(self):
         """Init sum_missing to hold sums for missing values."""
@@ -446,6 +461,8 @@ cdef class ClassificationCriterion(Criterion):
                 w = self.sample_weight[i]
 
             for k in range(self.n_outputs):
+                if self._has_y_missing and self._y_missing[i, k]:
+                    continue
                 c = <intp_t> self.y[i, k]
                 self.sum_missing[k, c] += w
 
@@ -523,6 +540,8 @@ cdef class ClassificationCriterion(Criterion):
                     w = self.sample_weight[i]
 
                 for k in range(self.n_outputs):
+                    if self._has_y_missing and self._y_missing[i, k]:
+                        continue
                     self.sum_left[k, <intp_t> self.y[i, k]] += w
 
                 self.weighted_n_left += w
@@ -537,6 +556,8 @@ cdef class ClassificationCriterion(Criterion):
                     w = self.sample_weight[i]
 
                 for k in range(self.n_outputs):
+                    if self._has_y_missing and self._y_missing[i, k]:
+                        continue
                     self.sum_left[k, <intp_t> self.y[i, k]] -= w
 
                 self.weighted_n_left -= w
