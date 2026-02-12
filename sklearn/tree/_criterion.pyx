@@ -842,38 +842,57 @@ cdef class ClusEntropy(ClassificationCriterion):
 
     cdef float64_t node_impurity(self) noexcept nogil:
         cdef float64_t impur = 0.0
-        cdef float64_t count_k
+        cdef float64_t count_k, total_o
         cdef float64_t w
-        cdef intp_t k, c, o
+        cdef intp_t c, o
 
         for o in range(self.n_outputs):
             w = self._w(o)
             if w <= 0.0:
                 continue
+
+            total_o = 0.0
+            for c in range(self.n_classes[o]):
+                total_o += self.sum_total[o][c]
+
+            if total_o <= 0.0:
+                continue
+
             for c in range(self.n_classes[o]):
                 count_k = self.sum_total[o][c]
                 if count_k > 0.0:
-                    count_k /= self.weighted_n_node_samples
+                    count_k /= total_o
+                    # entropy in log2
                     impur -= w * count_k * log(count_k)
+
         return impur
 
     cdef void children_impurity(self, float64_t* impurity_left,
                                float64_t* impurity_right) noexcept nogil:
         cdef float64_t left = 0.0
         cdef float64_t right = 0.0
-        cdef float64_t count_k
+        cdef float64_t count_k, total_o
         cdef float64_t w
-        cdef intp_t k, c, o
+        cdef intp_t c, o
+        cdef float64_t invln2 = _inv_ln2()
 
         # left
         for o in range(self.n_outputs):
             w = self._w(o)
             if w <= 0.0:
                 continue
+
+            total_o = 0.0
+            for c in range(self.n_classes[o]):
+                total_o += self.sum_left[o][c]
+
+            if total_o <= 0.0:
+                continue
+
             for c in range(self.n_classes[o]):
                 count_k = self.sum_left[o][c]
                 if count_k > 0.0:
-                    count_k /= self.weighted_n_left
+                    count_k /= total_o
                     left -= w * count_k * log(count_k)
 
         # right
@@ -881,15 +900,22 @@ cdef class ClusEntropy(ClassificationCriterion):
             w = self._w(o)
             if w <= 0.0:
                 continue
+
+            total_o = 0.0
+            for c in range(self.n_classes[o]):
+                total_o += self.sum_right[o][c]
+
+            if total_o <= 0.0:
+                continue
+
             for c in range(self.n_classes[o]):
                 count_k = self.sum_right[o][c]
                 if count_k > 0.0:
-                    count_k /= self.weighted_n_right
+                    count_k /= total_o
                     right -= w * count_k * log(count_k)
 
         impurity_left[0] = left
         impurity_right[0] = right
-
 
 cdef class ClusGini(ClassificationCriterion):
     """CLUS-style gini: sum over outputs (optionally weighted), not averaged."""

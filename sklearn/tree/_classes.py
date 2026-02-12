@@ -437,18 +437,16 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 # Fallback: set an attribute that your Cython criterion reads (you must implement it there).
                 setattr(criterion, "target_weights", tw)
 
-            if is_classifier(self):
-                # We assume missing targets are encoded as np.nan in y_train.
-                # Compute BEFORE you impute/replace missing labels for the internal tree builder.
-                if hasattr(self, "_y_missing_mask_"):
-                    # If PCTClassifier prepared it (recommended), use it.
-                    y_missing_mask = self._y_missing_mask_
-                else:
-                    # Fallback: derive from the training y passed to fit
-                    y_missing_mask = np.isnan(y).astype(np.uint8)
+        if is_classifier(self):
+            # Prefer PCTClassifier-produced mask (mask is on original y before imputation)
+            if hasattr(self, "_pct_missing_mask_"):
+                y_missing_mask = self._pct_missing_mask_.astype(np.uint8, copy=False)
+            else:
+                # Fallback: derive from y passed into _fit (may be imputed depending on caller)
+                y_missing_mask = np.isnan(y).astype(np.uint8)
 
-                if hasattr(criterion, "set_y_missing_mask"):
-                    criterion.set_y_missing_mask(y_missing_mask)
+            if hasattr(criterion, "set_y_missing_mask"):
+                criterion.set_y_missing_mask(y_missing_mask)
 
 
         SPLITTERS = SPARSE_SPLITTERS if issparse(X) else DENSE_SPLITTERS
