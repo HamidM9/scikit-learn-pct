@@ -418,7 +418,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
             if tw.ndim != 1:
                 raise ValueError(
-                    "target_weights must be 1D array-like of shape (n_outputs,)."
+                    "target_weights must be 1D array-like o shape (n_outputs,)."
                 )
 
             # At this point self.n_outputs_ is known.
