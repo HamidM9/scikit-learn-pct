@@ -947,56 +947,98 @@ cdef class ClusGini(ClassificationCriterion):
         for i in range(self.n_outputs):
             self._tw[i] = tw[i]
         self._has_tw = True
-
     cdef inline float64_t _w(self, intp_t o) noexcept nogil:
         if self._has_tw:
             return self._tw[o]
         return 1.0
 
+
     cdef float64_t node_impurity(self) noexcept nogil:
         cdef float64_t impur = 0.0
-        cdef float64_t sq_count
+        cdef float64_t total_o, count_k, p, s
         cdef float64_t w
-        cdef intp_t c, o
+        cdef intp_t o, c
 
         for o in range(self.n_outputs):
             w = self._w(o)
             if w <= 0.0:
                 continue
-            sq_count = 0.0
+
+            total_o = 0.0
             for c in range(self.n_classes[o]):
-                sq_count += (self.sum_total[o][c] / self.weighted_n_node_samples) ** 2
-            impur += w * (1.0 - sq_count)
+                total_o += self.sum_total[o][c]
+
+            if total_o <= 0.0:
+                continue
+
+            s = 0.0
+            for c in range(self.n_classes[o]):
+                count_k = self.sum_total[o][c]
+                if count_k > 0.0:
+                    p = count_k / total_o
+                    s += p * p
+
+            impur += w * (1.0 - s)
+
         return impur
+
 
     cdef void children_impurity(self, float64_t* impurity_left,
                                float64_t* impurity_right) noexcept nogil:
         cdef float64_t left = 0.0
         cdef float64_t right = 0.0
-        cdef float64_t sq_count
+        cdef float64_t total_o, count_k, p, s
         cdef float64_t w
-        cdef intp_t c, o
+        cdef intp_t o, c
 
+        # left impurity
         for o in range(self.n_outputs):
             w = self._w(o)
             if w <= 0.0:
                 continue
-            sq_count = 0.0
-            for c in range(self.n_classes[o]):
-                sq_count += (self.sum_left[o][c] / self.weighted_n_left) ** 2
-            left += w * (1.0 - sq_count)
 
+            total_o = 0.0
+            for c in range(self.n_classes[o]):
+                total_o += self.sum_left[o][c]
+
+            if total_o <= 0.0:
+                continue
+
+            s = 0.0
+            for c in range(self.n_classes[o]):
+                count_k = self.sum_left[o][c]
+                if count_k > 0.0:
+                    p = count_k / total_o
+                    s += p * p
+
+            left += w * (1.0 - s)
+
+        # right impurity
         for o in range(self.n_outputs):
             w = self._w(o)
             if w <= 0.0:
                 continue
-            sq_count = 0.0
+
+            total_o = 0.0
             for c in range(self.n_classes[o]):
-                sq_count += (self.sum_right[o][c] / self.weighted_n_right) ** 2
-            right += w * (1.0 - sq_count)
+                total_o += self.sum_right[o][c]
+
+            if total_o <= 0.0:
+                continue
+
+            s = 0.0
+            for c in range(self.n_classes[o]):
+                count_k = self.sum_right[o][c]
+                if count_k > 0.0:
+                    p = count_k / total_o
+                    s += p * p
+
+            right += w * (1.0 - s)
 
         impurity_left[0] = left
         impurity_right[0] = right
+
+    
 
 
 cdef class ClusModifiedEntropy(ClassificationCriterion):
