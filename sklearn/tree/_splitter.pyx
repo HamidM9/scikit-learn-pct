@@ -18,10 +18,10 @@ of splitting strategies:
   not guarantee the optimal split.
 """
 # Authors: The scikit-learn developers
-# SPDX-License-Identifier: BSD-3-Clause
+# SPDX-License-Identifier: BSD-3-Clausef
 
 from libc.string cimport memcpy
-
+from libc.math cimport fabs
 from sklearn.utils._typedefs cimport int8_t
 from sklearn.tree._criterion cimport Criterion
 from sklearn.tree._partitioner cimport (
@@ -385,8 +385,12 @@ cdef inline int node_split_best(
         #   and aren't constant.
 
         # Draw a feature at random
-        f_j = rand_int(n_drawn_constants, f_i - n_found_constants,
-                       random_state)
+        if splitter.tie_break_mode == 1:
+            # CLUS: deterministic feature scan order
+            f_j = n_drawn_constants
+        else:
+            # sklearn: draw at random
+            f_j = rand_int(n_drawn_constants, f_i - n_found_constants, random_state)
 
         if f_j < n_known_constants:
             # f_j in the interval [n_drawn_constants, n_known_constants[
@@ -505,51 +509,6 @@ cdef inline int node_split_best(
 
                     current_split.n_missing = n_missing
 
-                    if n_missing == 0:
-                        current_split.missing_go_to_left = n_left > n_right
-                    else:
-                        current_split.missing_go_to_left = missing_go_to_left
-
-                    best_split = current_split  # copy
-                elif (
-                    splitter.tie_break_mode == 1 and
-                    abs(current_proxy_improvement - best_proxy_improvement) <= TIE_EPS
-                ):
-                    # CLUS-style deterministic tie-breaking
-                    # Typical CLUS behavior: prefer the first encountered split in feature scan order.
-                    # In this loop, "first encountered" means: do NOT replace best_split on ties.
-                    # So: do nothing here.
-                    pass
-
-
-
-                    best_proxy_improvement = current_proxy_improvement
-                    # sum of halves is used to avoid infinite value # new n.11 split position and tie break
-                    if splitter.split_position_mode == 0:
-                        # midpoint (sklearn default)
-                        current_split.threshold = (
-                            feature_values[p_prev] / 2.0 + feature_values[p] / 2.0
-                        )
-
-                        if (
-                            current_split.threshold == feature_values[p] or
-                            current_split.threshold == INFINITY or
-                            current_split.threshold == -INFINITY
-                        ):
-                            current_split.threshold = feature_values[p_prev]
-                    else:
-                        # clus_exact: use observed value as the boundary.
-                        # With the sklearn partitioner convention (<= threshold goes left),
-                        # setting threshold = feature_values[p_prev] yields a split that matches:
-                        # "x > feature_values[p_prev]" for the right branch.
-                        current_split.threshold = feature_values[p_prev]
-
-
-                    current_split.n_missing = n_missing
-
-                    # if there are no missing values in the training data, during
-                    # test time, we send missing values to the branch that contains
-                    # the most samples during training time.
                     if n_missing == 0:
                         current_split.missing_go_to_left = n_left > n_right
                     else:
@@ -815,24 +774,13 @@ cdef inline int node_split_random(
             continue
 
         current_proxy_improvement = criterion.proxy_impurity_improvement()
-        # new n.11 split position and tie break
-
-        if current_proxy_improvement > best_proxy_improvement + 1e-15:
-            current_split.n_missing = n_missing
-
-            # if there are no missing values in the training data, during
-            # test time, we send missing values to the branch that contains
-            # the most samples during training time.
-            if has_missing:
-                current_split.missing_go_to_left = missing_go_to_left
-            else:
-                current_split.missing_go_to_left = n_left > n_right
-
+        if current_proxy_improvement > best_proxy_improvement + TIE_EPS:
             best_proxy_improvement = current_proxy_improvement
-            best_split = current_split  # copy
-        elif splitter.tie_break_mode == 1 and abs(current_proxy_improvement - best_proxy_improvement) <= 1e-15:
-            # CLUS: first wins -> do nothing
-            pass
+            best_split = current_split
+
+
+
+
     # Reorganize into samples[start:best.pos] + samples[best.pos:end]
     if best_split.pos < end:
         if current_split.feature != best_split.feature:

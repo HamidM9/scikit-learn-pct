@@ -491,6 +491,8 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 monotonic_cst *= -1
 
         if not isinstance(self.splitter, Splitter):
+            split_position_mode = 1 if getattr(self, "split_position", "midpoint") == "clus_exact" else 0
+            tie_break_mode = 1 if getattr(self, "tie_break", "sklearn") == "clus" else 0
             splitter = SPLITTERS[self.splitter](
                 criterion,
                 self.max_features_,
@@ -498,8 +500,8 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 min_weight_leaf,
                 random_state,
                 monotonic_cst,
-                getattr(self, "split_position", "midpoint"),
-                getattr(self, "tie_break", "sklearn"),
+                split_position_mode,
+                tie_break_mode,
             )
         # new n.11 split position and tie break
         if is_classifier(self):
@@ -1265,8 +1267,17 @@ class PCTClassifier(DecisionTreeClassifier):
                 y_train[missing_mask[:, k], k] = default_model[k]
         y_train = y_train.astype(int)
 
-        super().fit(X, y_train if y_train.shape[1] > 1 else y_train.ravel(),
-                    sample_weight=sample_weight, check_input=check_input)
+        self._fit_pct(
+            X,
+            y_train if y_train.shape[1] > 1 else y_train.ravel(),
+            sample_weight=sample_weight,
+            check_input=check_input,
+        )
+
+        tie_break_mode = 1 if self.tie_break == "clus" else 0
+        split_position_mode = 1 if self.split_position == "clus_exact" else 0
+
+
 
         # build per-node "has observed for target k" metadata using ORIGINAL mask
         path = self.decision_path(X, check_input=check_input)  # CSR (n_samples, n_nodes)
