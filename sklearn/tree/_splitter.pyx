@@ -114,18 +114,18 @@ cdef class Splitter:
         self.random_state = random_state
         self.monotonic_cst = monotonic_cst
         self.with_monotonic_cst = monotonic_cst is not None
-        # split_position # new n.11 split position and tie break
-        if split_position is None or split_position == "midpoint":
+        # split_position can be "midpoint"/"clus_exact" OR 0/1
+        if split_position is None or split_position == "midpoint" or split_position == 0:
             self.split_position_mode = 0
-        elif split_position == "clus_exact":
+        elif split_position == "clus_exact" or split_position == 1:
             self.split_position_mode = 1
         else:
             raise ValueError(f"Unknown split_position={split_position!r}")
 
-        # tie_break
-        if tie_break is None or tie_break == "sklearn":
+        # tie_break can be "sklearn"/"clus" OR 0/1
+        if tie_break is None or tie_break == "sklearn" or tie_break == 0:
             self.tie_break_mode = 0
-        elif tie_break == "clus":
+        elif tie_break == "clus" or tie_break == 1:
             self.tie_break_mode = 1
         else:
             raise ValueError(f"Unknown tie_break={tie_break!r}")

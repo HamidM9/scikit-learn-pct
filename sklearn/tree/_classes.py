@@ -1267,7 +1267,7 @@ class PCTClassifier(DecisionTreeClassifier):
                 y_train[missing_mask[:, k], k] = default_model[k]
         y_train = y_train.astype(int)
 
-        self._fit_pct(
+        self._fit(
             X,
             y_train if y_train.shape[1] > 1 else y_train.ravel(),
             sample_weight=sample_weight,
@@ -1305,6 +1305,12 @@ class PCTClassifier(DecisionTreeClassifier):
         self._pct_parent_ = parent
 
         return self
+
+    def _fit_pct(self, X, y, sample_weight=None, check_input=True):
+        # delegate to the standard sklearn training pipeline
+        return super()._fit(X, y, sample_weight=sample_weight, check_input=check_input)
+
+
 
     def _apply_missing_policy_to_proba(self, X, proba, check_input=True):
         """Adjust predicted probabilities for targets where leaf has no observed labels."""
