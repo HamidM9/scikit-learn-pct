@@ -409,7 +409,6 @@ cdef class ClassificationCriterion(Criterion):
                 w = sample_weight[i]
 
             # Count weighted class frequency for each target
-            # Count weighted class frequency for each target
             for k in range(self.n_outputs):
                 if self._has_y_missing and self._y_missing[i, k]:
                     continue
@@ -834,7 +833,7 @@ cdef class ClusEntropy(ClassificationCriterion):
         for i in range(self.n_outputs):
             self._tw[i] = tw[i]
         self._has_tw = True
-
+#numberone
     cdef inline float64_t _w(self, intp_t o) noexcept nogil:
         if self._has_tw:
             return self._tw[o]

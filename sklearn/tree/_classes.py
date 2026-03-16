@@ -399,7 +399,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             # might be shared and modified concurrently during parallel fitting
             criterion = copy.deepcopy(criterion)
 
-        # CLUS: optional F-test gating (criteria that support it)
+        # CLUS: optional F-test gating (criteria that support it) numbertwo
         ftest_level = getattr(self, "ftest_level", 0)
         if ftest_level and hasattr(criterion, "set_ftest_level"):
             criterion.set_ftest_level(int(ftest_level))
@@ -489,7 +489,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 # Since self.monotonic_cst encodes constraints on probabilities of the
                 # *positive class*, all signs must be flipped.
                 monotonic_cst *= -1
-
+#numberthree
         if not isinstance(self.splitter, Splitter):
             split_position_mode = 1 if getattr(self, "split_position", "midpoint") == "clus_exact" else 0
             tie_break_mode = 1 if getattr(self, "tie_break", "sklearn") == "clus" else 0
@@ -1175,7 +1175,7 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
 # new n.6 introduce PCTClassifier
 class PCTClassifier(DecisionTreeClassifier):
     """Predictive Clustering Tree classifier (CLUS-compatible prototype)."""
-
+#numberone
     _parameter_constraints = {
         **DecisionTreeClassifier._parameter_constraints,
         "criterion": [StrOptions({"gini", "entropy", "log_loss", "clus_entropy", "clus_gini"})],
@@ -1207,12 +1207,18 @@ class PCTClassifier(DecisionTreeClassifier):
         compat_mode="clus_v1",
         target_weights=None,
         missing_target_attr_handling="error",
+        descriptive_features=None,
+        clustering_features=None,
+        target_features=None,
     ):
         self.compat_mode = compat_mode
         self.target_weights = target_weights
         self.missing_target_attr_handling = missing_target_attr_handling
         self.split_position = split_position
         self.tie_break = tie_break
+        self.descriptive_features = descriptive_features
+        self.clustering_features = clustering_features
+        self.target_features = target_features
 
         super().__init__(
             criterion=criterion,
@@ -1230,6 +1236,112 @@ class PCTClassifier(DecisionTreeClassifier):
             monotonic_cst=monotonic_cst,
         )
 
+    def _get_n_outputs_for_role_schema(self, y):
+        """Return the number of output columns in y for role resolution."""
+        if y.ndim == 1:
+            return 1
+        return y.shape[1]
+
+    def _validate_role_indices(self, value, *, name, n_total_features):
+        """Validate indices over the combined schema [X | y]."""
+        if value is None:
+            return None
+
+        value = np.asarray(value, dtype=np.intp)
+
+        if value.ndim != 1:
+            raise ValueError(f"{name} must be a 1-dimensional array-like or None.")
+
+        if value.size == 0:
+            return np.empty(0, dtype=np.intp)
+
+        if np.any(value < 0) or np.any(value >= n_total_features):
+            raise ValueError(
+                f"{name} contains indices outside the valid combined schema range "
+                f"[0, {n_total_features - 1}]."
+            )
+
+        return np.unique(value)
+
+    def _resolve_pct_feature_roles(self, X, y):
+        """Resolve descriptive/clustering/target roles over the combined schema [X | y].
+
+        Combined schema order:
+            [X_0, X_1, ..., X_{p-1}, y_0, y_1, ..., y_{m-1}]
+
+        Defaults:
+        - if target_features is None: use the last column of the combined schema
+        - if clustering_features is None: use target_features
+        - if descriptive_features is None: use all remaining columns not in
+          clustering_features or target_features
+        """
+        n_x_features = X.shape[1]
+        n_y_outputs = self._get_n_outputs_for_role_schema(y)
+        n_total_features = n_x_features + n_y_outputs
+
+        descriptive = self._validate_role_indices(
+            self.descriptive_features,
+            name="descriptive_features",
+            n_total_features=n_total_features,
+        )
+        clustering = self._validate_role_indices(
+            self.clustering_features,
+            name="clustering_features",
+            n_total_features=n_total_features,
+        )
+        target = self._validate_role_indices(
+            self.target_features,
+            name="target_features",
+            n_total_features=n_total_features,
+        )
+
+        # Rule 1: default target = last column of the combined schema
+        if target is None:
+            target = np.array([n_total_features - 1], dtype=np.intp)
+
+        # Rule 2: default clustering = target
+        if clustering is None:
+            clustering = target.copy()
+
+        # Rule 3: default descriptive = all remaining columns
+        if descriptive is None:
+            excluded = np.union1d(clustering, target)
+            descriptive = np.setdiff1d(
+                np.arange(n_total_features, dtype=np.intp),
+                excluded,
+                assume_unique=False,
+            )
+
+        return {
+            "descriptive_features": descriptive,
+            "clustering_features": clustering,
+            "target_features": target,
+            "n_x_features": n_x_features,
+            "n_y_outputs": n_y_outputs,
+            "n_total_features": n_total_features,
+        }
+
+    def _split_resolved_roles_into_x_and_y(self, resolved_roles):
+        """Split combined-schema role indices into X-part and y-part."""
+        n_x_features = resolved_roles["n_x_features"]
+
+        def split_indices(indices):
+            x_part = indices[indices < n_x_features]
+            y_part = indices[indices >= n_x_features] - n_x_features
+            return x_part, y_part
+
+        descriptive_x, descriptive_y = split_indices(resolved_roles["descriptive_features"])
+        clustering_x, clustering_y = split_indices(resolved_roles["clustering_features"])
+        target_x, target_y = split_indices(resolved_roles["target_features"])
+
+        return {
+            "descriptive_x": descriptive_x,
+            "descriptive_y": descriptive_y,
+            "clustering_x": clustering_x,
+            "clustering_y": clustering_y,
+            "target_x": target_x,
+            "target_y": target_y,
+        }
     def fit(self, X, y, sample_weight=None, check_input=True):
         import numpy as np
 
@@ -1276,7 +1388,10 @@ class PCTClassifier(DecisionTreeClassifier):
 
         tie_break_mode = 1 if self.tie_break == "clus" else 0
         split_position_mode = 1 if self.split_position == "clus_exact" else 0
-
+        self._pct_feature_roles = self._resolve_pct_feature_roles(X, y)
+        self._pct_feature_roles_xy = self._split_resolved_roles_into_x_and_y(
+            self._pct_feature_roles
+        )
 
 
         # build per-node "has observed for target k" metadata using ORIGINAL mask
@@ -1304,7 +1419,6 @@ class PCTClassifier(DecisionTreeClassifier):
                 parent[cr] = p
         self._pct_parent_ = parent
 
-        return self
 
     def _fit_pct(self, X, y, sample_weight=None, check_input=True):
         # delegate to the standard sklearn training pipeline

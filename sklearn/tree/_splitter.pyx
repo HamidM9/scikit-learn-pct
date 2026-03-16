@@ -114,7 +114,7 @@ cdef class Splitter:
         self.random_state = random_state
         self.monotonic_cst = monotonic_cst
         self.with_monotonic_cst = monotonic_cst is not None
-        # split_position can be "midpoint"/"clus_exact" OR 0/1
+        # split_position can be "midpoint"/"clus_exact" OR 0/1 numberone
         if split_position is None or split_position == "midpoint" or split_position == 0:
             self.split_position_mode = 0
         elif split_position == "clus_exact" or split_position == 1:
