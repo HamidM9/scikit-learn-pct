@@ -1243,7 +1243,14 @@ class PCTClassifier(DecisionTreeClassifier):
         return y.shape[1]
 
     def _validate_role_indices(self, value, *, name, n_total_features):
-        """Validate indices over the combined schema [X | y]."""
+        """Validate indices over the combined schema [X | y].
+
+        Notes
+        -----
+        This validation only checks shape/range and removes duplicates within
+        the same role list. It does not enforce disjointness across roles.
+        Overlap between descriptive/clustering/target is allowed.
+        """
         if value is None:
             return None
 
@@ -1266,14 +1273,21 @@ class PCTClassifier(DecisionTreeClassifier):
     def _resolve_pct_feature_roles(self, X, y):
         """Resolve descriptive/clustering/target roles over the combined schema [X | y].
 
-        Combined schema order:
-            [X_0, X_1, ..., X_{p-1}, y_0, y_1, ..., y_{m-1}]
+        Combined schema order
+        ---------------------
+        [X_0, X_1, ..., X_{p-1}, y_0, y_1, ..., y_{m-1}]
 
-        Defaults:
+        Default rules
+        -------------
         - if target_features is None: use the last column of the combined schema
         - if clustering_features is None: use target_features
         - if descriptive_features is None: use all remaining columns not in
           clustering_features or target_features
+
+        Overlap policy
+        --------------
+        Overlap is allowed. If the user explicitly provides overlapping roles,
+        those overlaps are preserved exactly.
         """
         n_x_features = X.shape[1]
         n_y_outputs = self._get_n_outputs_for_role_schema(y)
@@ -1295,15 +1309,16 @@ class PCTClassifier(DecisionTreeClassifier):
             n_total_features=n_total_features,
         )
 
-        # Rule 1: default target = last column of the combined schema
+        # Default target = last column of combined schema
         if target is None:
             target = np.array([n_total_features - 1], dtype=np.intp)
 
-        # Rule 2: default clustering = target
+        # Default clustering = target
         if clustering is None:
             clustering = target.copy()
 
-        # Rule 3: default descriptive = all remaining columns
+        # Default descriptive = all remaining columns
+        # This only applies when descriptive_features is not explicitly provided.
         if descriptive is None:
             excluded = np.union1d(clustering, target)
             descriptive = np.setdiff1d(
