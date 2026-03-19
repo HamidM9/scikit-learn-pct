@@ -1367,6 +1367,52 @@ class PCTClassifier(DecisionTreeClassifier):
         if y_arr.ndim == 1:
             y_arr = y_arr.reshape(-1, 1)
 
+        # Resolve roles BEFORE training so low-level induction can use them
+        self._pct_feature_roles = self._resolve_pct_feature_roles(X, y_arr)
+        self._pct_feature_roles_xy = self._split_resolved_roles_into_x_and_y(
+            self._pct_feature_roles
+        )
+
+        roles_xy = self._pct_feature_roles_xy
+
+        # ------------------------------------------------------------------
+        # Classification v1 restrictions
+        # ------------------------------------------------------------------
+        # We only support:
+        #   - splits on X only
+        #   - impurity on Y only
+        #   - prediction on Y only
+        #   - target_y == clustering_y
+        #
+        # Reason:
+        # sklearn's current tree value layout is built from y outputs.
+        # Keeping target_y == clustering_y avoids changing tree_.value storage
+        # in the first patch.
+        # ------------------------------------------------------------------
+        if roles_xy["descriptive_y"].size != 0:
+            raise NotImplementedError(
+                "PCT classification v1 does not support descriptive_features "
+                "that point to y-columns. descriptive_y must be empty."
+            )
+
+        if roles_xy["clustering_x"].size != 0:
+            raise NotImplementedError(
+                "PCT classification v1 does not support clustering_features "
+                "that point to X-columns. clustering_x must be empty."
+            )
+
+        if roles_xy["target_x"].size != 0:
+            raise NotImplementedError(
+                "PCT classification v1 does not support target_features "
+                "that point to X-columns. target_x must be empty."
+            )
+
+        if not np.array_equal(roles_xy["target_y"], roles_xy["clustering_y"]):
+            raise NotImplementedError(
+                "PCT classification v1 requires target_y == clustering_y. "
+                "For now, the same y-columns must be used for impurity and prediction."
+            )
+
         # mask missing in original label space
         missing_mask = np.isnan(y_arr) if np.issubdtype(y_arr.dtype, np.floating) else np.zeros_like(y_arr, dtype=bool)
 
@@ -1394,6 +1440,8 @@ class PCTClassifier(DecisionTreeClassifier):
                 y_train[missing_mask[:, k], k] = default_model[k]
         y_train = y_train.astype(int)
 
+
+
         self._fit(
             X,
             y_train if y_train.shape[1] > 1 else y_train.ravel(),
@@ -1403,10 +1451,7 @@ class PCTClassifier(DecisionTreeClassifier):
 
         tie_break_mode = 1 if self.tie_break == "clus" else 0
         split_position_mode = 1 if self.split_position == "clus_exact" else 0
-        self._pct_feature_roles = self._resolve_pct_feature_roles(X, y)
-        self._pct_feature_roles_xy = self._split_resolved_roles_into_x_and_y(
-            self._pct_feature_roles
-        )
+
 
 
         # build per-node "has observed for target k" metadata using ORIGINAL mask
