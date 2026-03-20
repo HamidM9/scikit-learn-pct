@@ -503,6 +503,25 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 split_position_mode,
                 tie_break_mode,
             )
+
+
+
+        # ---------------------------------------------------------------
+        # PCT role-aware wiring (classification v1)
+        # ---------------------------------------------------------------
+        roles_xy = getattr(self, "_pct_feature_roles_xy", None)
+        if roles_xy is not None:
+            # Restrict candidate split features to descriptive_x
+            if hasattr(splitter, "set_allowed_features"):
+                splitter.set_allowed_features(
+                    np.asarray(roles_xy["descriptive_x"], dtype=np.intp)
+                )
+
+            # Restrict impurity computation to clustering_y
+            if hasattr(criterion, "set_clustering_outputs"):
+                criterion.set_clustering_outputs(
+                    np.asarray(roles_xy["clustering_y"], dtype=np.intp)
+                )
         # new n.11 split position and tie break
         if is_classifier(self):
             self.tree_ = Tree(self.n_features_in_, self.n_classes_, self.n_outputs_)

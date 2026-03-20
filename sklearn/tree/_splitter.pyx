@@ -107,7 +107,7 @@ cdef class Splitter:
 
         self.n_samples = 0
         self.n_features = 0
-
+        self.allowed_features = None  #pct
         self.max_features = max_features
         self.min_samples_leaf = min_samples_leaf
         self.min_weight_leaf = min_weight_leaf
@@ -148,6 +148,10 @@ cdef class Splitter:
                              self.monotonic_cst,
                              sp,
                              tb), self.__getstate__())
+
+    #pct
+    def set_allowed_features(self, allowed):
+        self.allowed_features = np.asarray(allowed, dtype=np.intp)
 
 
     cdef int init(

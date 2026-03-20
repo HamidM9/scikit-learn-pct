@@ -323,7 +323,7 @@ cdef class ClassificationCriterion(Criterion):
         self.weighted_n_left = 0.0
         self.weighted_n_right = 0.0
         self.weighted_n_missing = 0.0
-
+        self.clustering_outputs = None #pct
         self.n_classes = np.empty(n_outputs, dtype=np.intp)
         self._has_y_missing = False
 
@@ -838,84 +838,156 @@ cdef class ClusEntropy(ClassificationCriterion):
         if self._has_tw:
             return self._tw[o]
         return 1.0
-
+#pct
     cdef float64_t node_impurity(self) noexcept nogil:
         cdef float64_t impur = 0.0
         cdef float64_t count_k, total_o
         cdef float64_t w
-        cdef intp_t c, o
+        cdef intp_t c, o, idx
+        cdef bint use_subset = False
+        cdef intp_t[:] clustering_outputs_view
 
-        for o in range(self.n_outputs):
-            w = self._w(o)
-            if w <= 0.0:
-                continue
+        with gil:
+            if self.clustering_outputs is not None:
+                clustering_outputs_view = self.clustering_outputs
+                use_subset = True
 
-            total_o = 0.0
-            for c in range(self.n_classes[o]):
-                total_o += self.sum_total[o][c]
+        if not use_subset:
+            for o in range(self.n_outputs):
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
 
-            if total_o <= 0.0:
-                continue
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_total[o][c]
 
-            for c in range(self.n_classes[o]):
-                count_k = self.sum_total[o][c]
-                if count_k > 0.0:
-                    count_k /= total_o
-                    # entropy in log2
-                    impur -= w * count_k * log(count_k)
+                if total_o <= 0.0:
+                    continue
+
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_total[o][c]
+                    if count_k > 0.0:
+                        count_k /= total_o
+                        impur -= w * count_k * log(count_k)
+        else:
+            for idx in range(clustering_outputs_view.shape[0]):
+                o = clustering_outputs_view[idx]
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
+
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_total[o][c]
+
+                if total_o <= 0.0:
+                    continue
+
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_total[o][c]
+                    if count_k > 0.0:
+                        count_k /= total_o
+                        impur -= w * count_k * log(count_k)
 
         return impur
-
+    #pct
     cdef void children_impurity(self, float64_t* impurity_left,
                                float64_t* impurity_right) noexcept nogil:
         cdef float64_t left = 0.0
         cdef float64_t right = 0.0
         cdef float64_t count_k, total_o
         cdef float64_t w
-        cdef intp_t c, o
-        cdef float64_t invln2 = _inv_ln2()
+        cdef intp_t c, o, idx
+        cdef bint use_subset = False
+        cdef intp_t[:] clustering_outputs_view
 
-        # left
-        for o in range(self.n_outputs):
-            w = self._w(o)
-            if w <= 0.0:
-                continue
+        with gil:
+            if self.clustering_outputs is not None:
+                clustering_outputs_view = self.clustering_outputs
+                use_subset = True
 
-            total_o = 0.0
-            for c in range(self.n_classes[o]):
-                total_o += self.sum_left[o][c]
+        if not use_subset:
+            # left
+            for o in range(self.n_outputs):
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
 
-            if total_o <= 0.0:
-                continue
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_left[o][c]
 
-            for c in range(self.n_classes[o]):
-                count_k = self.sum_left[o][c]
-                if count_k > 0.0:
-                    count_k /= total_o
-                    left -= w * count_k * log(count_k)
+                if total_o <= 0.0:
+                    continue
 
-        # right
-        for o in range(self.n_outputs):
-            w = self._w(o)
-            if w <= 0.0:
-                continue
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_left[o][c]
+                    if count_k > 0.0:
+                        count_k /= total_o
+                        left -= w * count_k * log(count_k)
 
-            total_o = 0.0
-            for c in range(self.n_classes[o]):
-                total_o += self.sum_right[o][c]
+            # right
+            for o in range(self.n_outputs):
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
 
-            if total_o <= 0.0:
-                continue
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_right[o][c]
 
-            for c in range(self.n_classes[o]):
-                count_k = self.sum_right[o][c]
-                if count_k > 0.0:
-                    count_k /= total_o
-                    right -= w * count_k * log(count_k)
+                if total_o <= 0.0:
+                    continue
+
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_right[o][c]
+                    if count_k > 0.0:
+                        count_k /= total_o
+                        right -= w * count_k * log(count_k)
+        else:
+            # left
+            for idx in range(clustering_outputs_view.shape[0]):
+                o = clustering_outputs_view[idx]
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
+
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_left[o][c]
+
+                if total_o <= 0.0:
+                    continue
+
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_left[o][c]
+                    if count_k > 0.0:
+                        count_k /= total_o
+                        left -= w * count_k * log(count_k)
+
+            # right
+            for idx in range(clustering_outputs_view.shape[0]):
+                o = clustering_outputs_view[idx]
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
+
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_right[o][c]
+
+                if total_o <= 0.0:
+                    continue
+
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_right[o][c]
+                    if count_k > 0.0:
+                        count_k /= total_o
+                        right -= w * count_k * log(count_k)
 
         impurity_left[0] = left
         impurity_right[0] = right
-
 cdef class ClusGini(ClassificationCriterion):
     """CLUS-style gini: sum over outputs (optionally weighted), not averaged."""
 
@@ -951,95 +1023,174 @@ cdef class ClusGini(ClassificationCriterion):
             return self._tw[o]
         return 1.0
 
-
+#pct
     cdef float64_t node_impurity(self) noexcept nogil:
         cdef float64_t impur = 0.0
         cdef float64_t total_o, count_k, p, s
         cdef float64_t w
-        cdef intp_t o, c
+        cdef intp_t o, c, idx
+        cdef bint use_subset = False
+        cdef intp_t[:] clustering_outputs_view
 
-        for o in range(self.n_outputs):
-            w = self._w(o)
-            if w <= 0.0:
-                continue
+        with gil:
+            if self.clustering_outputs is not None:
+                clustering_outputs_view = self.clustering_outputs
+                use_subset = True
 
-            total_o = 0.0
-            for c in range(self.n_classes[o]):
-                total_o += self.sum_total[o][c]
+        if not use_subset:
+            for o in range(self.n_outputs):
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
 
-            if total_o <= 0.0:
-                continue
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_total[o][c]
 
-            s = 0.0
-            for c in range(self.n_classes[o]):
-                count_k = self.sum_total[o][c]
-                if count_k > 0.0:
-                    p = count_k / total_o
-                    s += p * p
+                if total_o <= 0.0:
+                    continue
 
-            impur += w * (1.0 - s)
+                s = 0.0
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_total[o][c]
+                    if count_k > 0.0:
+                        p = count_k / total_o
+                        s += p * p
+
+                impur += w * (1.0 - s)
+        else:
+            for idx in range(clustering_outputs_view.shape[0]):
+                o = clustering_outputs_view[idx]
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
+
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_total[o][c]
+
+                if total_o <= 0.0:
+                    continue
+
+                s = 0.0
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_total[o][c]
+                    if count_k > 0.0:
+                        p = count_k / total_o
+                        s += p * p
+
+                impur += w * (1.0 - s)
 
         return impur
-
-
+#pct
     cdef void children_impurity(self, float64_t* impurity_left,
                                float64_t* impurity_right) noexcept nogil:
         cdef float64_t left = 0.0
         cdef float64_t right = 0.0
         cdef float64_t total_o, count_k, p, s
         cdef float64_t w
-        cdef intp_t o, c
+        cdef intp_t o, c, idx
+        cdef bint use_subset = False
+        cdef intp_t[:] clustering_outputs_view
 
-        # left impurity
-        for o in range(self.n_outputs):
-            w = self._w(o)
-            if w <= 0.0:
-                continue
+        with gil:
+            if self.clustering_outputs is not None:
+                clustering_outputs_view = self.clustering_outputs
+                use_subset = True
 
-            total_o = 0.0
-            for c in range(self.n_classes[o]):
-                total_o += self.sum_left[o][c]
+        if not use_subset:
+            # left
+            for o in range(self.n_outputs):
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
 
-            if total_o <= 0.0:
-                continue
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_left[o][c]
 
-            s = 0.0
-            for c in range(self.n_classes[o]):
-                count_k = self.sum_left[o][c]
-                if count_k > 0.0:
-                    p = count_k / total_o
-                    s += p * p
+                if total_o <= 0.0:
+                    continue
 
-            left += w * (1.0 - s)
+                s = 0.0
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_left[o][c]
+                    if count_k > 0.0:
+                        p = count_k / total_o
+                        s += p * p
 
-        # right impurity
-        for o in range(self.n_outputs):
-            w = self._w(o)
-            if w <= 0.0:
-                continue
+                left += w * (1.0 - s)
 
-            total_o = 0.0
-            for c in range(self.n_classes[o]):
-                total_o += self.sum_right[o][c]
+            # right
+            for o in range(self.n_outputs):
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
 
-            if total_o <= 0.0:
-                continue
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_right[o][c]
 
-            s = 0.0
-            for c in range(self.n_classes[o]):
-                count_k = self.sum_right[o][c]
-                if count_k > 0.0:
-                    p = count_k / total_o
-                    s += p * p
+                if total_o <= 0.0:
+                    continue
 
-            right += w * (1.0 - s)
+                s = 0.0
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_right[o][c]
+                    if count_k > 0.0:
+                        p = count_k / total_o
+                        s += p * p
+
+                right += w * (1.0 - s)
+        else:
+            # left
+            for idx in range(clustering_outputs_view.shape[0]):
+                o = clustering_outputs_view[idx]
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
+
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_left[o][c]
+
+                if total_o <= 0.0:
+                    continue
+
+                s = 0.0
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_left[o][c]
+                    if count_k > 0.0:
+                        p = count_k / total_o
+                        s += p * p
+
+                left += w * (1.0 - s)
+
+            # right
+            for idx in range(clustering_outputs_view.shape[0]):
+                o = clustering_outputs_view[idx]
+                w = self._w(o)
+                if w <= 0.0:
+                    continue
+
+                total_o = 0.0
+                for c in range(self.n_classes[o]):
+                    total_o += self.sum_right[o][c]
+
+                if total_o <= 0.0:
+                    continue
+
+                s = 0.0
+                for c in range(self.n_classes[o]):
+                    count_k = self.sum_right[o][c]
+                    if count_k > 0.0:
+                        p = count_k / total_o
+                        s += p * p
+
+                right += w * (1.0 - s)
 
         impurity_left[0] = left
         impurity_right[0] = right
-
-    
-
-
 
 cdef inline void _move_sums_regression(
     RegressionCriterion criterion,
