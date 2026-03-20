@@ -109,6 +109,7 @@ cdef class ClassificationCriterion(Criterion):
     cdef cnp.uint8_t[:, ::1] _y_missing
     cdef bint _has_y_missing
     cpdef set_y_missing_mask(self, object y_missing)
+    cdef object clustering_outputs #pct v1
 
 cdef class RegressionCriterion(Criterion):
     """Abstract regression criterion."""

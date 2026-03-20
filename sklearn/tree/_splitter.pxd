@@ -63,6 +63,7 @@ cdef class Splitter:
     cdef int8_t split_position_mode  # 0=midpoint, 1=clus_exact
     cdef int8_t tie_break_mode  # 0=sklearn, 1=clus
     cdef const float64_t[:] sample_weight
+    cdef object allowed_features #pct v1
 
     # The samples vector `samples` is maintained by the Splitter object such
     # that the samples contained in a node are contiguous. With this setting,
