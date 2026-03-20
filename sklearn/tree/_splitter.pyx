@@ -213,14 +213,22 @@ cdef class Splitter:
         # Number of samples is number of positively weighted samples
         self.n_samples = j
         self.weighted_n_samples = weighted_n_samples
+#pct from here
+        cdef intp_t n_total_features = X.shape[1]
 
-        cdef intp_t n_features = X.shape[1]
-        self.features = np.arange(n_features, dtype=np.intp)
-        self.n_features = n_features
+        if self.allowed_features is not None:
+            self.features = np.asarray(self.allowed_features, dtype=np.intp)
+            self.n_features = self.features.shape[0]
+        else:
+            self.features = np.arange(n_total_features, dtype=np.intp)
+            self.n_features = n_total_features
+
+        if self.max_features > self.n_features:
+            self.max_features = self.n_features
 
         self.feature_values = np.empty(n_samples, dtype=np.float32)
-        self.constant_features = np.empty(n_features, dtype=np.intp)
-
+        self.constant_features = np.empty(self.n_features, dtype=np.intp)
+# to here
         self.y = y
 
         self.sample_weight = sample_weight

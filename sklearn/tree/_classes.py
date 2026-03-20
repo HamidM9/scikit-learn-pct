@@ -1355,6 +1355,10 @@ class PCTClassifier(DecisionTreeClassifier):
             "n_total_features": n_total_features,
         }
 
+
+
+
+#pct
     def _split_resolved_roles_into_x_and_y(self, resolved_roles):
         """Split combined-schema role indices into X-part and y-part."""
         n_x_features = resolved_roles["n_x_features"]
@@ -1368,7 +1372,7 @@ class PCTClassifier(DecisionTreeClassifier):
         clustering_x, clustering_y = split_indices(resolved_roles["clustering_features"])
         target_x, target_y = split_indices(resolved_roles["target_features"])
 
-        return {
+        roles_xy = {
             "descriptive_x": descriptive_x,
             "descriptive_y": descriptive_y,
             "clustering_x": clustering_x,
@@ -1376,6 +1380,11 @@ class PCTClassifier(DecisionTreeClassifier):
             "target_x": target_x,
             "target_y": target_y,
         }
+
+        print("resolved_roles input:", resolved_roles)
+        print("roles_xy output:", roles_xy)
+
+        return roles_xy
     def fit(self, X, y, sample_weight=None, check_input=True):
         import numpy as np
 

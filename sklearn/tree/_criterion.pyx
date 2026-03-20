@@ -348,7 +348,9 @@ cdef class ClassificationCriterion(Criterion):
     def __reduce__(self):
         return (type(self),
                 (self.n_outputs, np.asarray(self.n_classes)), self.__getstate__())
-
+    #pct
+    def set_clustering_outputs(self, outputs):
+        self.clustering_outputs = np.asarray(outputs, dtype=np.intp)
     cdef int init(
         self,
         const float64_t[:, ::1] y,
