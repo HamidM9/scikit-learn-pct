@@ -246,6 +246,8 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         sample_weight=None,
         check_input=True,
         missing_values_in_feature_mask=None,
+        pct_y_clust=None, #pct
+
     ):
         random_state = check_random_state(self.random_state)
 
@@ -313,13 +315,43 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             if self.class_weight is not None:
                 y_original = np.copy(y)
 
-            y_encoded = np.zeros(y.shape, dtype=int)
-            for k in range(self.n_outputs_):
-                classes_k, y_encoded[:, k] = np.unique(y[:, k], return_inverse=True)
+            y_value_encoded = np.zeros(y.shape, dtype=int)
+            for k in range(y.shape[1]):
+                classes_k, y_value_encoded[:, k] = np.unique(y[:, k], return_inverse=True)
                 self.classes_.append(classes_k)
                 self.n_classes_.append(classes_k.shape[0])
-            y = y_encoded
 
+            if self.class_weight is not None:
+                expanded_class_weight = compute_sample_weight(self.class_weight, y_original)
+
+            self.n_classes_ = np.array(self.n_classes_, dtype=np.intp)
+
+            # ---- clustering view ----
+            if pct_y_clust is None:
+                y_clust = y
+                y_clust_encoded = y_value_encoded
+                n_classes_clust = self.n_classes_
+            else:
+                y_clust = np.asarray(pct_y_clust)
+                if y_clust.ndim == 1:
+                    y_clust = y_clust.reshape(-1, 1)
+
+                y_clust_encoded = np.zeros(y_clust.shape, dtype=int)
+                n_classes_clust = []
+                for k in range(y_clust.shape[1]):
+                    _, y_clust_encoded[:, k] = np.unique(y_clust[:, k], return_inverse=True)
+                    n_classes_clust.append(np.unique(y_clust[:, k]).shape[0])
+
+                n_classes_clust = np.array(n_classes_clust, dtype=np.intp)
+
+            y = y_value_encoded
+
+            if getattr(y, "dtype", None) != DOUBLE or not y.flags.contiguous:
+                y = np.ascontiguousarray(y, dtype=DOUBLE)
+
+            if is_classification:
+                if getattr(y_clust_encoded, "dtype", None) != DOUBLE or not y_clust_encoded.flags.contiguous:
+                    y_clust_encoded = np.ascontiguousarray(y_clust_encoded, dtype=DOUBLE)
             if self.class_weight is not None:
                 expanded_class_weight = compute_sample_weight(
                     self.class_weight, y_original
@@ -385,19 +417,25 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         else:
             min_weight_leaf = self.min_weight_fraction_leaf * np.sum(sample_weight)
 
-        # Build tree
+        # Build tree # pct
         criterion = self.criterion
         if not isinstance(criterion, Criterion):
             if is_classification:
-                criterion = CRITERIA_CLF[self.criterion](
+                if pct_y_clust is None:
+                    criterion = CRITERIA_CLF[self.criterion](self.n_outputs_, self.n_classes_)
+                else:
+                    criterion = CRITERIA_CLF[self.criterion](
+                        y_clust_encoded.shape[1], n_classes_clust
+                    )
+                value_criterion = CRITERIA_CLF[self.criterion](
                     self.n_outputs_, self.n_classes_
                 )
             else:
                 criterion = CRITERIA_REG[self.criterion](self.n_outputs_, n_samples)
+                value_criterion = criterion
         else:
-            # Make a deepcopy in case the criterion has mutable attributes that
-            # might be shared and modified concurrently during parallel fitting
             criterion = copy.deepcopy(criterion)
+            value_criterion = copy.deepcopy(criterion)
 
         # CLUS: optional F-test gating (criteria that support it) numbertwo
         ftest_level = getattr(self, "ftest_level", 0)
@@ -495,6 +533,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             tie_break_mode = 1 if getattr(self, "tie_break", "sklearn") == "clus" else 0
             splitter = SPLITTERS[self.splitter](
                 criterion,
+                value_criterion, #pct
                 self.max_features_,
                 min_samples_leaf,
                 min_weight_leaf,
@@ -507,21 +546,15 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
 
         # ---------------------------------------------------------------
-        # PCT role-aware wiring (classification v1)
+        # PCT role-aware wiring (classification v1) #pct
         # ---------------------------------------------------------------
         roles_xy = getattr(self, "_pct_feature_roles_xy", None)
         if roles_xy is not None:
-            # Restrict candidate split features to descriptive_x
             if hasattr(splitter, "set_allowed_features"):
                 splitter.set_allowed_features(
                     np.asarray(roles_xy["descriptive_x"], dtype=np.intp)
                 )
 
-            # Restrict impurity computation to clustering_y
-            if hasattr(criterion, "set_clustering_outputs"):
-                criterion.set_clustering_outputs(
-                    np.asarray(roles_xy["clustering_y"], dtype=np.intp)
-                )
         # new n.11 split position and tie break
         if is_classifier(self):
             self.tree_ = Tree(self.n_features_in_, self.n_classes_, self.n_outputs_)
@@ -554,8 +587,24 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 self.min_impurity_decrease,
             )
 
-        builder.build(self.tree_, X, y, sample_weight, missing_values_in_feature_mask)
-
+        if is_classification and pct_y_clust is not None:
+            builder.build(
+                self.tree_,
+                X,
+                y_clust_encoded,
+                y,
+                sample_weight,
+                missing_values_in_feature_mask,
+            )
+        else:
+            builder.build(
+                self.tree_,
+                X,
+                y,
+                y,
+                sample_weight,
+                missing_values_in_feature_mask,
+            )
         if self.n_outputs_ == 1 and is_classifier(self):
             self.n_classes_ = self.n_classes_[0]
             self.classes_ = self.classes_[0]
@@ -1357,7 +1406,6 @@ class PCTClassifier(DecisionTreeClassifier):
 
 
 
-
 #pct
     def _split_resolved_roles_into_x_and_y(self, resolved_roles):
         """Split combined-schema role indices into X-part and y-part."""
@@ -1385,6 +1433,33 @@ class PCTClassifier(DecisionTreeClassifier):
         print("roles_xy output:", roles_xy)
 
         return roles_xy
+
+    #pct
+    def _build_pct_classification_views(self, X, y_arr, roles_xy):
+        import numpy as np
+
+        clust_parts = []
+        if roles_xy["clustering_x"].size:
+            clust_parts.append(np.asarray(X[:, roles_xy["clustering_x"]], dtype=np.float64))
+        if roles_xy["clustering_y"].size:
+            clust_parts.append(np.asarray(y_arr[:, roles_xy["clustering_y"]], dtype=np.float64))
+
+        if not clust_parts:
+            raise ValueError("clustering_features cannot be empty.")
+
+        if len(clust_parts) == 1:
+            y_clust = clust_parts[0]
+        else:
+            y_clust = np.hstack(clust_parts)
+
+        y_target = np.asarray(y_arr[:, roles_xy["target_y"]], dtype=np.float64)
+
+        if y_clust.ndim == 1:
+            y_clust = y_clust.reshape(-1, 1)
+        if y_target.ndim == 1:
+            y_target = y_target.reshape(-1, 1)
+
+        return y_clust, y_target
     def fit(self, X, y, sample_weight=None, check_input=True):
         import numpy as np
 
@@ -1423,59 +1498,70 @@ class PCTClassifier(DecisionTreeClassifier):
                 "that point to y-columns. descriptive_y must be empty."
             )
 
-        if roles_xy["clustering_x"].size != 0:
-            raise NotImplementedError(
-                "PCT classification v1 does not support clustering_features "
-                "that point to X-columns. clustering_x must be empty."
-            )
 
         if roles_xy["target_x"].size != 0:
             raise NotImplementedError(
                 "PCT classification v1 does not support target_features "
                 "that point to X-columns. target_x must be empty."
             )
+        #pct
+        y_clust_raw, y_target_raw = self._build_pct_classification_views(X, y_arr, roles_xy)
+        missing_mask_target = (
+            np.isnan(y_target_raw)
+            if np.issubdtype(y_target_raw.dtype, np.floating)
+            else np.zeros_like(y_target_raw, dtype=bool)
+        )
 
-        if not np.array_equal(roles_xy["target_y"], roles_xy["clustering_y"]):
-            raise NotImplementedError(
-                "PCT classification v1 requires target_y == clustering_y. "
-                "For now, the same y-columns must be used for impurity and prediction."
+        if self.missing_target_attr_handling == "error" and np.any(missing_mask_target):
+            raise ValueError(
+                "Missing targets found but missing_target_attr_handling='error'."
             )
 
-        # mask missing in original label space
-        missing_mask = np.isnan(y_arr) if np.issubdtype(y_arr.dtype, np.floating) else np.zeros_like(y_arr, dtype=bool)
-
-        if self.missing_target_attr_handling == "error" and np.any(missing_mask):
-            raise ValueError("Missing targets found but missing_target_attr_handling='error'.")
-
-        # default model = per-target majority class among observed labels
-        default_model = np.zeros(y_arr.shape[1], dtype=int)
-        for k in range(y_arr.shape[1]):
-            col = y_arr[:, k]
-            obs = col[~missing_mask[:, k]]
+        default_model = np.zeros(y_target_raw.shape[1], dtype=int)
+        for k in range(y_target_raw.shape[1]):
+            col = y_target_raw[:, k]
+            obs = col[~missing_mask_target[:, k]]
             if obs.size == 0:
                 default_model[k] = 0
             else:
-                # majority (ties resolved by smallest label after sorting)
                 vals, cnts = np.unique(obs.astype(int), return_counts=True)
                 default_model[k] = int(vals[np.argmax(cnts)])
+
         self._pct_default_model_ = default_model
-        self._pct_missing_mask_ = missing_mask
+        self._pct_missing_mask_ = missing_mask_target
+        self._pct_target_y_indices_ = roles_xy["target_y"].copy()
+        self._pct_roles_xy_ = roles_xy
 
-        # training y must be finite integers; impute missing with default_model
-        y_train = y_arr.copy()
-        for k in range(y_train.shape[1]):
-            if np.any(missing_mask[:, k]):
-                y_train[missing_mask[:, k], k] = default_model[k]
-        y_train = y_train.astype(int)
+        y_target_train = y_target_raw.copy()
+        for k in range(y_target_train.shape[1]):
+            if np.any(missing_mask_target[:, k]):
+                y_target_train[missing_mask_target[:, k], k] = default_model[k]
+        y_target_train = y_target_train.astype(int)
 
+        y_clust_train = y_clust_raw.copy()
 
+        # impute only the y-derived clustering part when it overlaps with target side
+        n_cx = roles_xy["clustering_x"].size
+        for j, y_col in enumerate(roles_xy["clustering_y"]):
+            # position in y_clust_train is offset by n_cx
+            clust_pos = n_cx + j
 
+            # if this clustering y-column is also a target column, reuse its default model
+            tgt_matches = np.where(roles_xy["target_y"] == y_col)[0]
+            if tgt_matches.size:
+                tgt_k = int(tgt_matches[0])
+                miss = missing_mask_target[:, tgt_k]
+                if np.any(miss):
+                    y_clust_train[miss, clust_pos] = default_model[tgt_k]
+#pct style
         self._fit(
             X,
-            y_train if y_train.shape[1] > 1 else y_train.ravel(),
+            y_target_train if y_target_train.shape[1] > 1 else y_target_train.ravel(),
             sample_weight=sample_weight,
             check_input=check_input,
+            pct_y_clust=y_clust_train,
         )
+
 
         tie_break_mode = 1 if self.tie_break == "clus" else 0
         split_position_mode = 1 if self.split_position == "clus_exact" else 0

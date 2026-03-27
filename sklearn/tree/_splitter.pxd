@@ -33,6 +33,8 @@ cdef class Splitter:
 
     # Internal structures
     cdef public Criterion criterion      # Impurity criterion
+    cdef public Criterion value_criterion
+
     cdef public intp_t max_features      # Number of features to test
     cdef public intp_t min_samples_leaf  # Min samples in a leaf
     cdef public float64_t min_weight_leaf   # Minimum weight in a leaf
@@ -40,6 +42,8 @@ cdef class Splitter:
     cdef object random_state             # Random state
     cdef uint32_t rand_r_state           # sklearn_rand_r random number state
 
+    cdef const float64_t[:, ::1] y_clust
+    cdef const float64_t[:, ::1] y_value
     cdef intp_t[::1] samples             # Sample indices in X, y
     cdef intp_t n_samples                # X.shape[0]
     cdef float64_t weighted_n_samples       # Weighted number of samples
@@ -85,7 +89,8 @@ cdef class Splitter:
     cdef int init(
         self,
         object X,
-        const float64_t[:, ::1] y,
+        const float64_t[:, ::1] y_clust,
+        const float64_t[:, ::1] y_value,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
     ) except -1

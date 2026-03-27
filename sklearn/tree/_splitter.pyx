@@ -66,13 +66,14 @@ cdef class Splitter:
     def __cinit__(
         self,
         Criterion criterion,
+        Criterion value_criterion, #pct
         intp_t max_features,
         intp_t min_samples_leaf,
         float64_t min_weight_leaf,
         object random_state,
         const int8_t[:] monotonic_cst,
-        object split_position="midpoint",
-        object tie_break="sklearn",
+        object split_position=None,
+        object tie_break=None,
     ):
         # new n.11 split position and tie break
 
@@ -114,6 +115,8 @@ cdef class Splitter:
         self.random_state = random_state
         self.monotonic_cst = monotonic_cst
         self.with_monotonic_cst = monotonic_cst is not None
+        self.criterion = criterion #pct
+        self.value_criterion = value_criterion #pct
         # split_position can be "midpoint"/"clus_exact" OR 0/1 numberone
         if split_position is None or split_position == "midpoint" or split_position == 0:
             self.split_position_mode = 0
@@ -141,6 +144,7 @@ cdef class Splitter:
         cdef object sp = "midpoint" if self.split_position_mode == 0 else "clus_exact"
         cdef object tb = "sklearn" if self.tie_break_mode == 0 else "clus"
         return (type(self), (self.criterion,
+                             self.value_criterion,
                              self.max_features,
                              self.min_samples_leaf,
                              self.min_weight_leaf,
@@ -154,10 +158,12 @@ cdef class Splitter:
         self.allowed_features = np.asarray(allowed, dtype=np.intp)
 
 
+    #pct
     cdef int init(
         self,
         object X,
-        const float64_t[:, ::1] y,
+        const float64_t[:, ::1] y_clust,
+        const float64_t[:, ::1] y_value,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
     ) except -1:
@@ -229,7 +235,9 @@ cdef class Splitter:
         self.feature_values = np.empty(n_samples, dtype=np.float32)
         self.constant_features = np.empty(self.n_features, dtype=np.intp)
 # to here
-        self.y = y
+        #pct
+        self.y_clust = y_clust
+        self.y_value = y_value
 
         self.sample_weight = sample_weight
         if missing_values_in_feature_mask is not None:
@@ -260,8 +268,18 @@ cdef class Splitter:
         self.start = start
         self.end = end
 
+        #pct
         self.criterion.init(
-            self.y,
+            self.y_clust,
+            self.sample_weight,
+            self.weighted_n_samples,
+            self.samples,
+            start,
+            end
+        )
+
+        self.value_criterion.init(
+            self.y_value,
             self.sample_weight,
             self.weighted_n_samples,
             self.samples,
@@ -291,12 +309,10 @@ cdef class Splitter:
     cdef void node_value(self, float64_t* dest) noexcept nogil:
         """Copy the value of node samples[start:end] into dest."""
 
-        self.criterion.node_value(dest)
-
+        self.value_criterion.node_value(dest) #pct
     cdef inline void clip_node_value(self, float64_t* dest, float64_t lower_bound, float64_t upper_bound) noexcept nogil:
         """Clip the value in dest between lower_bound and upper_bound for monotonic constraints."""
-
-        self.criterion.clip_node_value(dest, lower_bound, upper_bound)
+        self.value_criterion.clip_node_value(dest, lower_bound, upper_bound)
 
     cdef float64_t node_impurity(self) noexcept nogil:
         """Return the impurity of the current node."""
@@ -840,11 +856,12 @@ cdef class BestSplitter(Splitter):
     cdef int init(
         self,
         object X,
-        const float64_t[:, ::1] y,
+        const float64_t[:, ::1] y_clust,
+        const float64_t[:, ::1] y_value,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
     ) except -1:
-        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        Splitter.init(self, X, y_clust,y_value, sample_weight, missing_values_in_feature_mask)
         self.partitioner = DensePartitioner(
             X, self.samples, self.feature_values, missing_values_in_feature_mask
         )
@@ -868,11 +885,12 @@ cdef class BestSparseSplitter(Splitter):
     cdef int init(
         self,
         object X,
-        const float64_t[:, ::1] y,
+        const float64_t[:, ::1] y_clust,
+        const float64_t[:, ::1] y_value,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
     ) except -1:
-        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        Splitter.init(self, X, y_clust,y_value, sample_weight, missing_values_in_feature_mask)
         self.partitioner = SparsePartitioner(
             X, self.samples, self.n_samples, self.feature_values, missing_values_in_feature_mask
         )
@@ -896,11 +914,12 @@ cdef class RandomSplitter(Splitter):
     cdef int init(
         self,
         object X,
-        const float64_t[:, ::1] y,
+        const float64_t[:, ::1] y_clust,
+        const float64_t[:, ::1] y_value,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
     ) except -1:
-        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        Splitter.init(self, X, y_clust,y_value , sample_weight, missing_values_in_feature_mask)
         self.partitioner = DensePartitioner(
             X, self.samples, self.feature_values, missing_values_in_feature_mask
         )
@@ -924,11 +943,12 @@ cdef class RandomSparseSplitter(Splitter):
     cdef int init(
         self,
         object X,
-        const float64_t[:, ::1] y,
+        const float64_t[:, ::1] y_clust,
+        const float64_t[:, ::1] y_value,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
     ) except -1:
-        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        Splitter.init(self, X, y_clust,y_value, sample_weight, missing_values_in_feature_mask)
         self.partitioner = SparsePartitioner(
             X, self.samples, self.n_samples, self.feature_values, missing_values_in_feature_mask
         )

@@ -99,11 +99,13 @@ cdef class TreeBuilder:
     cdef intp_t max_depth               # Maximal tree depth
     cdef float64_t min_impurity_decrease   # Impurity threshold for early stopping
 
+    #pct
     cpdef build(
         self,
         Tree tree,
         object X,
-        const float64_t[:, ::1] y,
+        const float64_t[:, ::1] y_clust,
+        const float64_t[:, ::1] y_value,
         const float64_t[:] sample_weight=*,
         const uint8_t[::1] missing_values_in_feature_mask=*,
     )
