@@ -455,35 +455,40 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
             if tw.ndim != 1:
                 raise ValueError(
-                    "target_weights must be 1D array-like o shape (n_outputs,)."
+                    "target_weights must be 1D array-like of shape (n_clustering_outputs,)."
                 )
 
-            # At this point self.n_outputs_ is known.
-            if tw.size != self.n_outputs_:
+            if is_classification and pct_y_clust is not None:
+                expected_tw = y_clust_encoded.shape[1]
+            else:
+                expected_tw = self.n_outputs_
+
+            if tw.size != expected_tw:
                 raise ValueError(
-                    f"target_weights length {tw.size} does not match n_outputs={self.n_outputs_}."
+                    f"target_weights length {tw.size} does not match "
+                    f"the number of clustering outputs ({expected_tw})."
                 )
 
-            if np.any(tw < 0):
-                raise ValueError("target_weights must be non-negative.")
-
-            # Preferred: expose a method in your Cython criterion, e.g. SVarS.set_target_weights(...)
             if hasattr(criterion, "set_target_weights"):
                 criterion.set_target_weights(tw)
-            else:
-                # Fallback: set an attribute that your Cython criterion reads (you must implement it there).
-                setattr(criterion, "target_weights", tw)
 
         if is_classifier(self):
-            # Prefer PCTClassifier-produced mask (mask is on original y before imputation)
-            if hasattr(self, "_pct_missing_mask_"):
-                y_missing_mask = self._pct_missing_mask_.astype(np.uint8, copy=False)
-            else:
-                # Fallback: derive from y passed into _fit (may be imputed depending on caller)
-                y_missing_mask = np.isnan(y).astype(np.uint8)
+            y_missing_mask_target = getattr(self, "_pct_missing_mask_", None)
+            y_missing_mask_clust = getattr(self, "_pct_missing_mask_clust_", None)
 
             if hasattr(criterion, "set_y_missing_mask"):
-                criterion.set_y_missing_mask(y_missing_mask)
+                if pct_y_clust is not None and y_missing_mask_clust is not None:
+                    criterion.set_y_missing_mask(
+                        np.asarray(y_missing_mask_clust, dtype=np.uint8)
+                    )
+                elif y_missing_mask_target is not None:
+                    criterion.set_y_missing_mask(
+                        np.asarray(y_missing_mask_target, dtype=np.uint8)
+                    )
+                else:
+                    criterion.set_y_missing_mask(
+                        np.asarray(np.isnan(y), dtype=np.uint8)
+                    )
 
 
         SPLITTERS = SPARSE_SPLITTERS if issparse(X) else DENSE_SPLITTERS
@@ -1532,6 +1537,40 @@ class PCTClassifier(DecisionTreeClassifier):
         self._pct_target_y_indices_ = roles_xy["target_y"].copy()
         self._pct_roles_xy_ = roles_xy
 
+        # Build missing mask for the clustering view seen by the impurity criterion.
+        # Layout must match y_clust = [X[:, clustering_x] | y[:, clustering_y]]
+        clust_missing_parts = []
+
+        # X-derived clustering columns are assumed fully observed here
+        if roles_xy["clustering_x"].size:
+            clust_missing_parts.append(
+                np.zeros((X.shape[0], roles_xy["clustering_x"].size), dtype=bool)
+            )
+
+        # y-derived clustering columns inherit missingness only if that y-column is
+        # also part of target_y (so we have a corresponding missing_mask_target column)
+        if roles_xy["clustering_y"].size:
+            y_clust_missing = np.zeros(
+                (X.shape[0], roles_xy["clustering_y"].size), dtype=bool
+            )
+
+            for j, y_col in enumerate(roles_xy["clustering_y"]):
+                tgt_matches = np.where(roles_xy["target_y"] == y_col)[0]
+                if tgt_matches.size:
+                    tgt_k = int(tgt_matches[0])
+                    y_clust_missing[:, j] = missing_mask_target[:, tgt_k]
+
+            clust_missing_parts.append(y_clust_missing)
+
+        if clust_missing_parts:
+            missing_mask_clust = np.hstack(clust_missing_parts)
+        else:
+            missing_mask_clust = np.zeros((X.shape[0], 0), dtype=bool)
+
+        self._pct_missing_mask_clust_ = missing_mask_clust
+
+
+
         y_target_train = y_target_raw.copy()
         for k in range(y_target_train.shape[1]):
             if np.any(missing_mask_target[:, k]):
@@ -1566,19 +1605,22 @@ class PCTClassifier(DecisionTreeClassifier):
         tie_break_mode = 1 if self.tie_break == "clus" else 0
         split_position_mode = 1 if self.split_position == "clus_exact" else 0
 
-
-
-        # build per-node "has observed for target k" metadata using ORIGINAL mask
+        # build per-node "has observed for target k" metadata using ORIGINAL target mask
         path = self.decision_path(X, check_input=check_input)  # CSR (n_samples, n_nodes)
         n_nodes = self.tree_.node_count
-        n_outputs = y_train.shape[1]
+        n_outputs = y_target_train.shape[1]
 
-        obs_flags = (~missing_mask).astype(np.float64)  # (n_samples, n_outputs)
-        node_obs_counts = np.zeros((n_nodes, n_outputs), dtype=np.int64)
-        for k in range(n_outputs):
-            counts = path.T.dot(obs_flags[:, k])
-            node_obs_counts[:, k] = np.asarray(counts).ravel().astype(np.int64)
-        self._pct_node_has_obs_ = node_obs_counts > 0
+        node_has_obs = np.zeros((n_nodes, n_outputs), dtype=bool)
+
+        # missing_mask_target is shape (n_samples, n_outputs) for TARGET outputs only
+        obs_mask = ~missing_mask_target
+
+        for i in range(X.shape[0]):
+            node_ids = path.indices[path.indptr[i]: path.indptr[i + 1]]
+            for node_id in node_ids:
+                node_has_obs[node_id] |= obs_mask[i]
+
+        self._pct_node_has_observed_ = node_has_obs
 
         # parent pointers for parent_node fallback
         children_left = self.tree_.children_left

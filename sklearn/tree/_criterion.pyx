@@ -812,6 +812,7 @@ cdef class ClusEntropy(ClassificationCriterion):
     cdef float64_t* _tw
     cdef bint _has_tw
 
+
     def __cinit__(self):
         self._tw = NULL
         self._has_tw = False
@@ -876,7 +877,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                     count_k = self.sum_total[o, c]
                     if count_k > 0.0:
                         p = count_k / total_o
-                        impur -= w * p * log(p) * _inv_ln2()
+                        impur -= w * p * (log(p) / log(2.0))
         else:
             for o in range(self.n_outputs):
                 w = self._w(o)
@@ -894,7 +895,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                     count_k = self.sum_total[o, c]
                     if count_k > 0.0:
                         p = count_k / total_o
-                        impur -= w * p * log(p) * _inv_ln2()
+                        impur -= w * p * (log(p) / log(2.0))
 
         return impur
 
@@ -931,7 +932,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                         count_k = self.sum_left[o, c]
                         if count_k > 0.0:
                             p = count_k / total_o
-                            left -= w * p * log(p) * _inv_ln2()
+                            left -= w * p * (log(p) / log(2.0))
 
                 total_o = 0.0
                 for c in range(self.n_classes[o]):
@@ -941,7 +942,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                         count_k = self.sum_right[o, c]
                         if count_k > 0.0:
                             p = count_k / total_o
-                            right -= w * p * log(p) * _inv_ln2()
+                            right -= w * p * (log(p) / log(2.0))
         else:
             for o in range(self.n_outputs):
                 w = self._w(o)
@@ -956,7 +957,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                         count_k = self.sum_left[o, c]
                         if count_k > 0.0:
                             p = count_k / total_o
-                            left -= w * p * log(p) * _inv_ln2()
+                            left -= w * p * (log(p) / log(2.0))
 
                 total_o = 0.0
                 for c in range(self.n_classes[o]):
@@ -966,7 +967,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                         count_k = self.sum_right[o, c]
                         if count_k > 0.0:
                             p = count_k / total_o
-                            right -= w * p * log(p) * _inv_ln2()
+                            right -= w * p * (log(p) / log(2.0))
 
         impurity_left[0] = left
         impurity_right[0] = right
