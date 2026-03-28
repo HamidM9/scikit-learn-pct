@@ -123,4 +123,3 @@ cdef class RegressionCriterion(Criterion):
 
 
 
-
