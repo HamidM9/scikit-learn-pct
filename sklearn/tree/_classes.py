@@ -422,17 +422,32 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         if not isinstance(criterion, Criterion):
             if is_classification:
                 if pct_y_clust is None:
-                    criterion = CRITERIA_CLF[self.criterion](self.n_outputs_, self.n_classes_)
+                    criterion = CRITERIA_CLF[self.criterion](
+                        self.n_outputs_, self.n_classes_
+                    )
                 else:
                     criterion = CRITERIA_CLF[self.criterion](
                         y_clust_encoded.shape[1], n_classes_clust
                     )
+
                 value_criterion = CRITERIA_CLF[self.criterion](
                     self.n_outputs_, self.n_classes_
                 )
             else:
-                criterion = CRITERIA_REG[self.criterion](self.n_outputs_, n_samples)
-                value_criterion = criterion
+                if pct_y_clust is None:
+                    n_clustering_outputs = self.n_outputs_
+                else:
+                    pct_y_clust = np.asarray(pct_y_clust, dtype=np.float64)
+                    if pct_y_clust.ndim == 1:
+                        pct_y_clust = pct_y_clust.reshape(-1, 1)
+                    n_clustering_outputs = pct_y_clust.shape[1]
+
+                criterion = CRITERIA_REG[self.criterion](
+                    n_clustering_outputs, n_samples
+                )
+                value_criterion = CRITERIA_REG[self.criterion](
+                    self.n_outputs_, n_samples
+                )
         else:
             criterion = copy.deepcopy(criterion)
             value_criterion = copy.deepcopy(criterion)
@@ -458,8 +473,11 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                     "target_weights must be 1D array-like of shape (n_clustering_outputs,)."
                 )
 
-            if is_classification and pct_y_clust is not None:
-                expected_tw = y_clust_encoded.shape[1]
+            if pct_y_clust is not None:
+                if is_classification:
+                    expected_tw = y_clust_encoded.shape[1]
+                else:
+                    expected_tw = pct_y_clust.shape[1]
             else:
                 expected_tw = self.n_outputs_
 
@@ -592,11 +610,16 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 self.min_impurity_decrease,
             )
 
-        if is_classification and pct_y_clust is not None:
+        if pct_y_clust is not None:
+            if is_classification:
+                y_clust_for_build = y_clust_encoded
+            else:
+                y_clust_for_build = pct_y_clust
+
             builder.build(
                 self.tree_,
                 X,
-                y_clust_encoded,
+                y_clust_for_build,
                 y,
                 sample_weight,
                 missing_values_in_feature_mask,
@@ -2103,11 +2126,19 @@ class PCTRegressor(DecisionTreeRegressor):
         "pruning": [StrOptions({"none", "ccp"})],
         "split_position": [StrOptions({"midpoint", "clus_exact"})],
         "tie_break": [StrOptions({"sklearn", "clus"})],
-        "missing_clustering_attr_handling": [StrOptions({"ignore", "estimate_from_parent_node", "estimate_from_training_set"})],
-        "missing_target_attr_handling": [StrOptions({"zero", "default_model", "parent_node"})],
+        "missing_clustering_attr_handling": [
+            StrOptions({"ignore", "estimate_from_parent_node", "estimate_from_training_set"})
+        ],
+        "missing_target_attr_handling": [
+            StrOptions({"zero", "default_model", "parent_node"})
+        ],
         "ftest": [Interval(Real, 0.0, 1.0, closed="both"), "array-like", None],
+        "descriptive_features": ["array-like", None],
+        "clustering_features": ["array-like", None],
+        "target_features": ["array-like", None],
+    }
 
-    } # new n.11 split position and tie break
+    # new n.11 split position and tie break
 
 
 
@@ -2139,7 +2170,10 @@ class PCTRegressor(DecisionTreeRegressor):
         leaf_model="mean",
         pruning="none",
         ftest=1.0,
-        missing_target_attr_handling="default_model"
+        missing_target_attr_handling="default_model",
+        descriptive_features=None,
+        clustering_features=None,
+        target_features=None,
     ):
         # 1) Store CLUS-specific parameters (required for sklearn estimator API)
         self.compat_mode = compat_mode
@@ -2153,6 +2187,9 @@ class PCTRegressor(DecisionTreeRegressor):
         self.missing_clustering_attr_handling = missing_clustering_attr_handling
         self.ftest = ftest
         self.missing_target_attr_handling = missing_target_attr_handling
+        self.descriptive_features = descriptive_features
+        self.clustering_features = clustering_features
+        self.target_features = target_features
 
         # 2) Delegate standard tree params to DecisionTreeRegressor
         super().__init__(
@@ -2214,63 +2251,249 @@ class PCTRegressor(DecisionTreeRegressor):
         # Broadcast multiply columns: (n_samples, n_outputs) * (n_outputs,)
         return y_arr * sqrt_w
 # new n.11 fit and pred
+    def _get_n_outputs_for_role_schema(self, y):
+        if y.ndim == 1:
+            return 1
+        return y.shape[1]
 
+    def _validate_role_indices(self, value, *, name, n_total_features):
+        if value is None:
+            return None
+
+        value = np.asarray(value, dtype=np.intp)
+
+        if value.ndim != 1:
+            raise ValueError(f"{name} must be a 1-dimensional array-like or None.")
+
+        if value.size == 0:
+            return np.empty(0, dtype=np.intp)
+
+        if np.any(value < 0) or np.any(value >= n_total_features):
+            raise ValueError(
+                f"{name} contains indices outside the valid combined schema range "
+                f"[0, {n_total_features - 1}]."
+            )
+
+        return np.unique(value)
+
+    def _resolve_pct_feature_roles(self, X, y):
+        n_x_features = X.shape[1]
+        n_y_outputs = self._get_n_outputs_for_role_schema(y)
+        n_total_features = n_x_features + n_y_outputs
+
+        descriptive = self._validate_role_indices(
+            self.descriptive_features,
+            name="descriptive_features",
+            n_total_features=n_total_features,
+        )
+        clustering = self._validate_role_indices(
+            self.clustering_features,
+            name="clustering_features",
+            n_total_features=n_total_features,
+        )
+        target = self._validate_role_indices(
+            self.target_features,
+            name="target_features",
+            n_total_features=n_total_features,
+        )
+
+        if target is None:
+            target = np.array([n_total_features - 1], dtype=np.intp)
+
+        if clustering is None:
+            clustering = target.copy()
+
+        if descriptive is None:
+            excluded = np.union1d(clustering, target)
+            descriptive = np.setdiff1d(
+                np.arange(n_total_features, dtype=np.intp),
+                excluded,
+                assume_unique=False,
+            )
+
+        return {
+            "descriptive_features": descriptive,
+            "clustering_features": clustering,
+            "target_features": target,
+            "n_x_features": n_x_features,
+            "n_y_outputs": n_y_outputs,
+            "n_total_features": n_total_features,
+        }
+
+    def _split_resolved_roles_into_x_and_y(self, resolved_roles):
+        n_x_features = resolved_roles["n_x_features"]
+
+        def split_indices(indices):
+            x_part = indices[indices < n_x_features]
+            y_part = indices[indices >= n_x_features] - n_x_features
+            return x_part, y_part
+
+        descriptive_x, descriptive_y = split_indices(resolved_roles["descriptive_features"])
+        clustering_x, clustering_y = split_indices(resolved_roles["clustering_features"])
+        target_x, target_y = split_indices(resolved_roles["target_features"])
+
+        return {
+            "descriptive_x": descriptive_x,
+            "descriptive_y": descriptive_y,
+            "clustering_x": clustering_x,
+            "clustering_y": clustering_y,
+            "target_x": target_x,
+            "target_y": target_y,
+        }
+
+    def _build_pct_regression_views(self, X, y_arr, roles_xy):
+        clust_parts = []
+
+        if roles_xy["clustering_x"].size:
+            clust_parts.append(np.asarray(X[:, roles_xy["clustering_x"]], dtype=np.float64))
+
+        if roles_xy["clustering_y"].size:
+            clust_parts.append(np.asarray(y_arr[:, roles_xy["clustering_y"]], dtype=np.float64))
+
+        if not clust_parts:
+            raise ValueError("clustering_features cannot be empty.")
+
+        if len(clust_parts) == 1:
+            y_clust = clust_parts[0]
+        else:
+            y_clust = np.hstack(clust_parts)
+
+        if roles_xy["target_x"].size:
+            raise NotImplementedError(
+                "PCT regression v1 does not support target_features that point to X-columns. "
+                "target_x must be empty."
+            )
+
+        if roles_xy["target_y"].size == 0:
+            raise ValueError("target_features cannot be empty.")
+
+        y_target = np.asarray(y_arr[:, roles_xy["target_y"]], dtype=np.float64)
+
+        if y_clust.ndim == 1:
+            y_clust = y_clust.reshape(-1, 1)
+        if y_target.ndim == 1:
+            y_target = y_target.reshape(-1, 1)
+
+        return y_clust, y_target
     def fit(self, X, y, sample_weight=None, check_input=True):
-
-        from sklearn.utils.validation import check_array
-
-        # ---- existing ftest mapping (keep your current lines) ----
-        self.ftest_level = self._resolve_ftest_level()
-
-        # ---- Missing target handling (CLUS MissingTargetAttrHandling) ----
-        y_arr = np.asarray(y)
+        y_arr = np.asarray(y, dtype=np.float64)
         if y_arr.ndim == 1:
             y_arr = y_arr.reshape(-1, 1)
 
-        # Mask of missing targets in the ORIGINAL y (True where missing)
-        missing_mask = np.isnan(y_arr)
+        self.ftest_level = self._resolve_ftest_level()
 
-        # Default model per target = mean of observed values (ignoring NaN)
-        # If a target is entirely missing, default to 0.0 (safe fallback)
-        default_model = np.zeros(y_arr.shape[1], dtype=float)
-        for k in range(y_arr.shape[1]):
-            col = y_arr[:, k]
-            obs = col[~np.isnan(col)]
+        # Resolve combined [X | y] roles
+        self._pct_feature_roles = self._resolve_pct_feature_roles(X, y_arr)
+        self._pct_feature_roles_xy = self._split_resolved_roles_into_x_and_y(
+            self._pct_feature_roles
+        )
+        roles_xy = self._pct_feature_roles_xy
+
+        # v1 restriction: splitting only on X
+        if roles_xy["descriptive_y"].size != 0:
+            raise NotImplementedError(
+                "PCT regression v1 does not support descriptive_features that point "
+                "to y-columns. descriptive_y must be empty."
+            )
+
+        # Build clustering-view and target-view
+        y_clust_raw, y_target_raw = self._build_pct_regression_views(X, y_arr, roles_xy)
+
+        # Missingness is defined on target outputs only
+        missing_mask_target = np.isnan(y_target_raw)
+
+        if self.missing_target == "error" and np.any(missing_mask_target):
+            raise ValueError(
+                "Missing targets found but missing_target='error'."
+            )
+
+        # Default model per target = mean of observed values
+        default_model = np.zeros(y_target_raw.shape[1], dtype=np.float64)
+        for k in range(y_target_raw.shape[1]):
+            col = y_target_raw[:, k]
+            obs = col[~missing_mask_target[:, k]]
             default_model[k] = float(np.mean(obs)) if obs.size else 0.0
+
         self._pct_default_model_ = default_model
+        self._pct_missing_mask_ = missing_mask_target
+        self._pct_target_y_indices_ = roles_xy["target_y"].copy()
+        self._pct_roles_xy_ = roles_xy
 
-        # For training the tree, we must provide finite y values.
-        # Impute missing with default model means (neutral choice for training).
-        y_train = y_arr.copy()
-        for k in range(y_train.shape[1]):
-            y_train[missing_mask[:, k], k] = default_model[k]
+        # Missing mask for clustering view:
+        # [X[:, clustering_x] | y[:, clustering_y]]
+        clust_missing_parts = []
 
-        # Fit the actual tree using the imputed targets.
-        super().fit(X, y_train, sample_weight=sample_weight, check_input=check_input)
+        if roles_xy["clustering_x"].size:
+            clust_missing_parts.append(
+                np.zeros((X.shape[0], roles_xy["clustering_x"].size), dtype=bool)
+            )
 
-        # After fitting, build per-node “has observed target k?” flags using ORIGINAL missingness.
-        # We compute observed counts for each node and each target based on training paths.
+        if roles_xy["clustering_y"].size:
+            y_clust_missing = np.zeros(
+                (X.shape[0], roles_xy["clustering_y"].size), dtype=bool
+            )
 
-        # Decision path matrix: shape (n_samples, n_nodes), CSR sparse
+            for j, y_col in enumerate(roles_xy["clustering_y"]):
+                tgt_matches = np.where(roles_xy["target_y"] == y_col)[0]
+                if tgt_matches.size:
+                    tgt_k = int(tgt_matches[0])
+                    y_clust_missing[:, j] = missing_mask_target[:, tgt_k]
+
+            clust_missing_parts.append(y_clust_missing)
+
+        if clust_missing_parts:
+            missing_mask_clust = np.hstack(clust_missing_parts)
+        else:
+            missing_mask_clust = np.zeros((X.shape[0], 0), dtype=bool)
+
+        self._pct_missing_mask_clust_ = missing_mask_clust
+
+        # Training target view: impute target outputs for leaf statistics / predictions
+        y_target_train = y_target_raw.copy()
+        for k in range(y_target_train.shape[1]):
+            miss = missing_mask_target[:, k]
+            if np.any(miss):
+                y_target_train[miss, k] = default_model[k]
+
+        # Training clustering view: impute only overlapping y-derived clustering columns
+        y_clust_train = y_clust_raw.copy()
+        n_cx = roles_xy["clustering_x"].size
+
+        for j, y_col in enumerate(roles_xy["clustering_y"]):
+            clust_pos = n_cx + j
+            tgt_matches = np.where(roles_xy["target_y"] == y_col)[0]
+            if tgt_matches.size:
+                tgt_k = int(tgt_matches[0])
+                miss = missing_mask_target[:, tgt_k]
+                if np.any(miss):
+                    y_clust_train[miss, clust_pos] = default_model[tgt_k]
+
+        # Fit:
+        # - split criterion sees y_clust_train
+        # - leaf value sees y_target_train
+        self._fit(
+            X,
+            y_target_train if y_target_train.shape[1] > 1 else y_target_train.ravel(),
+            sample_weight=sample_weight,
+            check_input=check_input,
+            pct_y_clust=y_clust_train,
+        )
+
+        # Per-node "has observed target?" metadata built from ORIGINAL target missingness
         path = self.decision_path(X, check_input=check_input)
-
         n_nodes = self.tree_.node_count
-        n_outputs = y_train.shape[1]
+        n_outputs = y_target_train.shape[1]
 
-        # observed_mask: float array to allow sparse dot
-        # For each target k: 1 where observed, 0 where missing
-        obs_flags = (~missing_mask).astype(np.float64)  # (n_samples, n_outputs)
+        node_has_obs = np.zeros((n_nodes, n_outputs), dtype=bool)
+        obs_mask = ~missing_mask_target
 
-        # node_obs_counts[k][node] = number of observed samples for target k that pass through node
-        node_obs_counts = np.zeros((n_nodes, n_outputs), dtype=np.int64)
-        for k in range(n_outputs):
-            # path.T @ obs_flags[:, k] gives counts per node
-            counts = path.T.dot(obs_flags[:, k])
-            node_obs_counts[:, k] = np.asarray(counts).ravel().astype(np.int64)
+        for i in range(X.shape[0]):
+            node_ids = path.indices[path.indptr[i]: path.indptr[i + 1]]
+            for node_id in node_ids:
+                node_has_obs[node_id] |= obs_mask[i]
 
-        self._pct_node_has_obs_ = node_obs_counts > 0
+        self._pct_node_has_obs_ = node_has_obs
 
-        # Build parent pointers for fast “parent node fallback”
         children_left = self.tree_.children_left
         children_right = self.tree_.children_right
         parent = np.full(n_nodes, -1, dtype=np.int64)
