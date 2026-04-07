@@ -1364,7 +1364,8 @@ class PCTClassifier(DecisionTreeClassifier):
                 f"[0, {n_total_features - 1}]."
             )
 
-        return np.unique(value)
+        _, first_idx = np.unique(value, return_index=True)
+        return value[np.sort(first_idx)]
 
     def _resolve_pct_feature_roles(self, X, y):
         """Resolve descriptive/clustering/target roles over the combined schema [X | y].
@@ -2274,7 +2275,8 @@ class PCTRegressor(DecisionTreeRegressor):
                 f"[0, {n_total_features - 1}]."
             )
 
-        return np.unique(value)
+        _, first_idx = np.unique(value, return_index=True)
+        return value[np.sort(first_idx)]
 
     def _resolve_pct_feature_roles(self, X, y):
         n_x_features = X.shape[1]
