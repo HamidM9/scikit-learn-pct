@@ -575,7 +575,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         if roles_xy is not None:
             if hasattr(splitter, "set_allowed_features"):
                 splitter.set_allowed_features(
-                    np.asarray(roles_xy["descriptive_x"], dtype=np.intp)
+                    np.array(roles_xy["descriptive_x"], dtype=np.intp, copy=True)
                 )
 
         # new n.11 split position and tie break
@@ -1406,9 +1406,11 @@ class PCTClassifier(DecisionTreeClassifier):
             n_total_features=n_total_features,
         )
 
-        # Default target = last column of combined schema
+        # Default target = all y-columns in the combined schema
         if target is None:
-            target = np.array([n_total_features - 1], dtype=np.intp)
+            target = np.arange(
+                n_x_features, n_x_features + n_y_outputs, dtype=np.intp
+            )
 
         # Default clustering = target
         if clustering is None:
@@ -1416,11 +1418,16 @@ class PCTClassifier(DecisionTreeClassifier):
 
         # Default descriptive = all remaining columns
         # This only applies when descriptive_features is not explicitly provided.
+        # Default descriptive = all remaining X-columns only.
+        # In PCT v1, descriptive features are restricted to X, so the default
+        # must never introduce descriptive_y entries from the combined schema.
         if descriptive is None:
-            excluded = np.union1d(clustering, target)
+            x_all = np.arange(n_x_features, dtype=np.intp)
+            excluded_x = clustering[clustering < n_x_features]
+            excluded_x = np.union1d(excluded_x, target[target < n_x_features])
             descriptive = np.setdiff1d(
-                np.arange(n_total_features, dtype=np.intp),
-                excluded,
+                x_all,
+                excluded_x,
                 assume_unique=False,
             )
 
@@ -1458,8 +1465,6 @@ class PCTClassifier(DecisionTreeClassifier):
             "target_y": target_y,
         }
 
-        print("resolved_roles input:", resolved_roles)
-        print("roles_xy output:", roles_xy)
 
         return roles_xy
 
@@ -1527,11 +1532,20 @@ class PCTClassifier(DecisionTreeClassifier):
                 "that point to y-columns. descriptive_y must be empty."
             )
 
+        if roles_xy["clustering_x"].size != 0:
+            raise NotImplementedError(
+                "PCT classification v1 does not support clustering_features "
+                "that point to X-columns. clustering_x must be empty."
+            )
 
         if roles_xy["target_x"].size != 0:
             raise NotImplementedError(
                 "PCT classification v1 does not support target_features "
                 "that point to X-columns. target_x must be empty."
+            )
+        if not np.array_equal(roles_xy["target_y"], roles_xy["clustering_y"]):
+            raise NotImplementedError(
+                "PCT classification v1 requires target_y == clustering_y."
             )
         #pct
         y_clust_raw, y_target_raw = self._build_pct_classification_views(X, y_arr, roles_xy)
@@ -1644,6 +1658,7 @@ class PCTClassifier(DecisionTreeClassifier):
             for node_id in node_ids:
                 node_has_obs[node_id] |= obs_mask[i]
 
+        self._pct_node_has_obs_ = node_has_obs
         self._pct_node_has_observed_ = node_has_obs
 
         # parent pointers for parent_node fallback
@@ -1658,6 +1673,7 @@ class PCTClassifier(DecisionTreeClassifier):
             if cr != -1:
                 parent[cr] = p
         self._pct_parent_ = parent
+        return self
 
 
     def _fit_pct(self, X, y, sample_weight=None, check_input=True):
@@ -2300,16 +2316,20 @@ class PCTRegressor(DecisionTreeRegressor):
         )
 
         if target is None:
-            target = np.array([n_total_features - 1], dtype=np.intp)
+            target = np.arange(
+                n_x_features, n_x_features + n_y_outputs, dtype=np.intp
+            )
 
         if clustering is None:
             clustering = target.copy()
 
         if descriptive is None:
-            excluded = np.union1d(clustering, target)
+            x_all = np.arange(n_x_features, dtype=np.intp)
+            excluded_x = clustering[clustering < n_x_features]
+            excluded_x = np.union1d(excluded_x, target[target < n_x_features])
             descriptive = np.setdiff1d(
-                np.arange(n_total_features, dtype=np.intp),
-                excluded,
+                x_all,
+                excluded_x,
                 assume_unique=False,
             )
 

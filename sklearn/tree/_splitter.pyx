@@ -63,61 +63,116 @@ cdef class Splitter:
     """
 
 
-    def __cinit__(
-        self,
-        Criterion criterion,
-        Criterion value_criterion, #pct
-        intp_t max_features,
-        intp_t min_samples_leaf,
-        float64_t min_weight_leaf,
-        object random_state,
-        const int8_t[:] monotonic_cst,
-        object split_position=None,
-        object tie_break=None,
-    ):
-        # new n.11 split position and tie break
-
+    def __cinit__(self, *args, **kwargs):
         """
-        Parameters
-        ----------
-        criterion : Criterion
-            The criterion to measure the quality of a split.
+        Backward-compatible constructor.
 
-        max_features : intp_t
-            The maximal number of randomly selected features which can be
-            considered for a split.
+        Supported signatures:
 
-        min_samples_leaf : intp_t
-            The minimal number of samples each leaf can have, where splits
-            which would result in having less samples in a leaf are not
-            considered.
+        Old sklearn style:
+            Splitter(criterion, max_features, min_samples_leaf,
+                     min_weight_leaf, random_state, monotonic_cst=None)
 
-        min_weight_leaf : float64_t
-            The minimal weight each leaf can have, where the weight is the sum
-            of the weights of each sample in it.
-
-        random_state : object
-            The user inputted random state to be used for pseudo-randomness
-
-        monotonic_cst : const int8_t[:]
-            Monotonicity constraints
-
+        New PCT style:
+            Splitter(criterion, value_criterion, max_features, min_samples_leaf,
+                     min_weight_leaf, random_state, monotonic_cst,
+                     split_position=None, tie_break=None)
         """
+        cdef object criterion
+        cdef object value_criterion
+        cdef object max_features
+        cdef object min_samples_leaf
+        cdef object min_weight_leaf
+        cdef object random_state
+        cdef object monotonic_cst
+        cdef object split_position
+        cdef object tie_break
 
-        self.criterion = criterion
+        monotonic_cst = kwargs.pop("monotonic_cst", None)
+        split_position = kwargs.pop("split_position", None)
+        tie_break = kwargs.pop("tie_break", None)
+
+        if kwargs:
+            raise TypeError(
+                f"Unexpected keyword arguments: {sorted(kwargs.keys())}"
+            )
+
+        # ------------------------------------------------------------
+        # Old sklearn signature
+        # ------------------------------------------------------------
+        if len(args) == 5:
+            criterion, max_features, min_samples_leaf, min_weight_leaf, random_state = args
+            value_criterion = criterion
+
+        elif len(args) == 6:
+            criterion, max_features, min_samples_leaf, min_weight_leaf, random_state, monotonic_cst = args
+            value_criterion = criterion
+
+        # ------------------------------------------------------------
+        # New PCT signature
+        # ------------------------------------------------------------
+        elif len(args) == 7:
+            (
+                criterion,
+                value_criterion,
+                max_features,
+                min_samples_leaf,
+                min_weight_leaf,
+                random_state,
+                monotonic_cst,
+            ) = args
+
+        elif len(args) == 8:
+            (
+                criterion,
+                value_criterion,
+                max_features,
+                min_samples_leaf,
+                min_weight_leaf,
+                random_state,
+                monotonic_cst,
+                split_position,
+            ) = args
+
+        elif len(args) == 9:
+            (
+                criterion,
+                value_criterion,
+                max_features,
+                min_samples_leaf,
+                min_weight_leaf,
+                random_state,
+                monotonic_cst,
+                split_position,
+                tie_break,
+            ) = args
+
+        else:
+            raise TypeError(
+                "Splitter constructor expects either:\n"
+                "  old style: (criterion, max_features, min_samples_leaf, "
+                "min_weight_leaf, random_state[, monotonic_cst])\n"
+                "or\n"
+                "  new style: (criterion, value_criterion, max_features, "
+                "min_samples_leaf, min_weight_leaf, random_state, "
+                "monotonic_cst[, split_position[, tie_break]])"
+            )
 
         self.n_samples = 0
         self.n_features = 0
-        self.allowed_features = None  #pct
+        self.allowed_features = None  # pct
+
+        self.criterion = criterion
+        self.value_criterion = value_criterion
+
         self.max_features = max_features
         self.min_samples_leaf = min_samples_leaf
         self.min_weight_leaf = min_weight_leaf
         self.random_state = random_state
         self.monotonic_cst = monotonic_cst
         self.with_monotonic_cst = monotonic_cst is not None
-        self.criterion = criterion #pct
-        self.value_criterion = value_criterion #pct
-        # split_position can be "midpoint"/"clus_exact" OR 0/1 numberone
+
+        # split_position can be "midpoint"/"clus_exact" OR 0/1
         if split_position is None or split_position == "midpoint" or split_position == 0:
             self.split_position_mode = 0
         elif split_position == "clus_exact" or split_position == 1:
@@ -756,7 +811,12 @@ cdef inline int node_split_random(
             # be given to this edge case.
             missing_go_to_left = rand_int(0, 2, random_state)
         else:
+            # sklearn behavior: when no missing values were seen during training,
+            # a missing test sample is sent to the child with more samples.
             missing_go_to_left = 0
+
+        current_split.n_missing = n_missing
+        current_split.missing_go_to_left = missing_go_to_left
         criterion.missing_go_to_left = missing_go_to_left
 
         if current_split.threshold == max_feature_value:
@@ -804,6 +864,12 @@ cdef inline int node_split_random(
         current_proxy_improvement = criterion.proxy_impurity_improvement()
         if current_proxy_improvement > best_proxy_improvement + TIE_EPS:
             best_proxy_improvement = current_proxy_improvement
+
+            # If no missing values were seen during training, sklearn sends
+            # missing test values to the child with more samples.
+            if n_missing == 0:
+                current_split.missing_go_to_left = n_left > n_right
+
             best_split = current_split
 
 

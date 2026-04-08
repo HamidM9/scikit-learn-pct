@@ -67,15 +67,46 @@ def _make_missing_target_data():
 # ---------------------------------------------------------------------
 # Role resolution tests
 # ---------------------------------------------------------------------
-def test_pct_regressor_default_roles_currently_fail_in_v1_due_to_descriptive_y():
+def test_pct_regressor_default_roles_use_all_y_for_target_and_clustering_and_x_for_descriptive():
     X, y = _make_basic_regression_data()
 
     reg = PCTRegressor(random_state=0)
+    reg.fit(X, y)
 
-    with pytest.raises(NotImplementedError, match="descriptive_features that point to y-columns"):
-        reg.fit(X, y)
+    roles = reg._pct_feature_roles
+    roles_xy = reg._pct_feature_roles_xy
 
+    # Combined schema = [X0, X1, X2, y0, y1]
+    assert np.array_equal(
+        roles["target_features"],
+        np.array([3, 4], dtype=np.intp),
+    )
+    assert np.array_equal(
+        roles["clustering_features"],
+        np.array([3, 4], dtype=np.intp),
+    )
+    assert np.array_equal(
+        roles["descriptive_features"],
+        np.array([0, 1, 2], dtype=np.intp),
+    )
 
+    assert np.array_equal(
+        roles_xy["descriptive_x"],
+        np.array([0, 1, 2], dtype=np.intp),
+    )
+    assert roles_xy["descriptive_y"].size == 0
+
+    assert roles_xy["clustering_x"].size == 0
+    assert np.array_equal(
+        roles_xy["clustering_y"],
+        np.array([0, 1], dtype=np.intp),
+    )
+
+    assert roles_xy["target_x"].size == 0
+    assert np.array_equal(
+        roles_xy["target_y"],
+        np.array([0, 1], dtype=np.intp),
+    )
 def test_pct_regressor_explicit_role_resolution():
     X, y = _make_basic_regression_data()
 
@@ -646,3 +677,15 @@ def test_pct_regressor_can_use_clustering_y_only_and_target_y_only():
     assert pred.shape == (4,)
     assert np.allclose(pred[:2], 1.0)
     assert np.allclose(pred[2:], 9.0)
+
+
+def test_pct_regressor_stored_descriptive_roles_are_not_mutated_by_fit():
+    X, y = _make_basic_regression_data()
+
+    reg = PCTRegressor(random_state=0)
+    reg.fit(X, y)
+
+    assert np.array_equal(
+        reg._pct_feature_roles_xy["descriptive_x"],
+        np.array([0, 1, 2], dtype=np.intp),
+    )
