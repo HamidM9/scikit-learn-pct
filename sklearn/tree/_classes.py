@@ -858,6 +858,53 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         return tags
 
 
+
+
+
+
+def _pct_get_target_view_from_y(y, target_y_indices):
+    """Return the target-role view of y using y-column indices."""
+    y_arr = np.asarray(y)
+
+    if y_arr.ndim == 1:
+        y_arr = y_arr.reshape(-1, 1)
+
+    if target_y_indices is None:
+        return y_arr
+
+    return y_arr[:, target_y_indices]
+
+
+def _pct_numeric_missing_row_mask(arr):
+    """Return per-row missing mask for numeric arrays."""
+    arr = np.asarray(arr)
+
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+
+    if np.issubdtype(arr.dtype, np.number):
+        return np.isnan(arr).any(axis=1)
+
+    return np.zeros(arr.shape[0], dtype=bool)
+
+
+def _pct_apply_RemoveMissingTarget_yes(X, y, *, target_y_indices, sample_weight=None):
+    """Drop rows whose target-role outputs contain missing values."""
+    y_target = _pct_get_target_view_from_y(y, target_y_indices)
+    missing_row_mask = _pct_numeric_missing_row_mask(y_target)
+
+    if not np.any(missing_row_mask):
+        return X, y, sample_weight
+
+    keep_mask = ~missing_row_mask
+    X = X[keep_mask]
+    y = y[keep_mask]
+    if sample_weight is not None:
+        sample_weight = sample_weight[keep_mask]
+
+    return X, y, sample_weight
+
+
 # =============================================================================
 # Public estimators
 # =============================================================================
@@ -1280,6 +1327,7 @@ class PCTClassifier(DecisionTreeClassifier):
         "missing_target_attr_handling": [StrOptions({"error", "zero", "default_model", "parent_node"})],
         "split_position": [StrOptions({"midpoint", "clus_exact"})],
         "tie_break": [StrOptions({"sklearn", "clus"})],
+        "RemoveMissingTarget": [StrOptions({"Yes", "No"})],
     }
 
     def __init__(
@@ -1306,6 +1354,8 @@ class PCTClassifier(DecisionTreeClassifier):
         descriptive_features=None,
         clustering_features=None,
         target_features=None,
+        RemoveMissingTarget="No",
+
     ):
         self.compat_mode = compat_mode
         self.target_weights = target_weights
@@ -1315,6 +1365,7 @@ class PCTClassifier(DecisionTreeClassifier):
         self.descriptive_features = descriptive_features
         self.clustering_features = clustering_features
         self.target_features = target_features
+        self.RemoveMissingTarget = RemoveMissingTarget
 
         super().__init__(
             criterion=criterion,
@@ -1331,6 +1382,7 @@ class PCTClassifier(DecisionTreeClassifier):
             ccp_alpha=ccp_alpha,
             monotonic_cst=monotonic_cst,
         )
+
 
     def _get_n_outputs_for_role_schema(self, y):
         """Return the number of output columns in y for role resolution."""
@@ -1546,6 +1598,34 @@ class PCTClassifier(DecisionTreeClassifier):
         if not np.array_equal(roles_xy["target_y"], roles_xy["clustering_y"]):
             raise NotImplementedError(
                 "PCT classification v1 requires target_y == clustering_y."
+            )
+
+        y_arr = np.asarray(y)
+
+        # We treat missing labels as np.nan for numeric arrays.
+        # If your pipeline uses -1 sentinel, convert it to np.nan upstream (recommended).
+        if y_arr.ndim == 1:
+            y_arr = y_arr.reshape(-1, 1)
+
+        # Resolve roles BEFORE training so low-level induction can use them
+        self._pct_feature_roles = self._resolve_pct_feature_roles(X, y_arr)
+        self._pct_feature_roles_xy = self._split_resolved_roles_into_x_and_y(
+            self._pct_feature_roles
+        )
+
+        roles_xy = self._pct_feature_roles_xy
+
+        if self.RemoveMissingTarget == "Yes":
+            X, y_arr, sample_weight = _pct_apply_RemoveMissingTarget_yes(
+                X,
+                y_arr,
+                target_y_indices=roles_xy["target_y"],
+                sample_weight=sample_weight,
+            )
+        elif self.RemoveMissingTarget != "No":
+            raise ValueError(
+                "RemoveMissingTarget must be either 'Yes' or 'No'. "
+                f"Got {self.RemoveMissingTarget!r}."
             )
         #pct
         y_clust_raw, y_target_raw = self._build_pct_classification_views(X, y_arr, roles_xy)
@@ -2153,6 +2233,7 @@ class PCTRegressor(DecisionTreeRegressor):
         "descriptive_features": ["array-like", None],
         "clustering_features": ["array-like", None],
         "target_features": ["array-like", None],
+        "RemoveMissingTarget": [StrOptions({"Yes", "No"})],
     }
 
     # new n.11 split position and tie break
@@ -2191,6 +2272,8 @@ class PCTRegressor(DecisionTreeRegressor):
         descriptive_features=None,
         clustering_features=None,
         target_features=None,
+        RemoveMissingTarget="No",
+
     ):
         # 1) Store CLUS-specific parameters (required for sklearn estimator API)
         self.compat_mode = compat_mode
@@ -2207,6 +2290,7 @@ class PCTRegressor(DecisionTreeRegressor):
         self.descriptive_features = descriptive_features
         self.clustering_features = clustering_features
         self.target_features = target_features
+        self.RemoveMissingTarget = RemoveMissingTarget
 
         # 2) Delegate standard tree params to DecisionTreeRegressor
         super().__init__(
@@ -2267,6 +2351,9 @@ class PCTRegressor(DecisionTreeRegressor):
 
         # Broadcast multiply columns: (n_samples, n_outputs) * (n_outputs,)
         return y_arr * sqrt_w
+
+
+
 # new n.11 fit and pred
     def _get_n_outputs_for_role_schema(self, y):
         if y.ndim == 1:
@@ -2417,7 +2504,31 @@ class PCTRegressor(DecisionTreeRegressor):
                 "PCT regression v1 does not support descriptive_features that point "
                 "to y-columns. descriptive_y must be empty."
             )
+        y_arr = np.asarray(y, dtype=np.float64)
+        if y_arr.ndim == 1:
+            y_arr = y_arr.reshape(-1, 1)
 
+        self.ftest_level = self._resolve_ftest_level()
+
+        # Resolve combined [X | y] roles
+        self._pct_feature_roles = self._resolve_pct_feature_roles(X, y_arr)
+        self._pct_feature_roles_xy = self._split_resolved_roles_into_x_and_y(
+            self._pct_feature_roles
+        )
+        roles_xy = self._pct_feature_roles_xy
+
+        if self.RemoveMissingTarget == "Yes":
+            X, y_arr, sample_weight = _pct_apply_RemoveMissingTarget_yes(
+                X,
+                y_arr,
+                target_y_indices=roles_xy["target_y"],
+                sample_weight=sample_weight,
+            )
+        elif self.RemoveMissingTarget != "No":
+            raise ValueError(
+                "RemoveMissingTarget must be either 'Yes' or 'No'. "
+                f"Got {self.RemoveMissingTarget!r}."
+            )
         # Build clustering-view and target-view
         y_clust_raw, y_target_raw = self._build_pct_regression_views(X, y_arr, roles_xy)
 
