@@ -905,6 +905,10 @@ def _pct_apply_RemoveMissingTarget_yes(X, y, *, target_y_indices, sample_weight=
     return X, y, sample_weight
 
 
+def _pct_has_missing_target_rows(y, target_y_indices):
+    y_target = _pct_get_target_view_from_y(y, target_y_indices)
+    return _pct_numeric_missing_row_mask(y_target).any()
+
 # =============================================================================
 # Public estimators
 # =============================================================================
@@ -1547,7 +1551,7 @@ class PCTClassifier(DecisionTreeClassifier):
 
         return y_clust, y_target
     def fit(self, X, y, sample_weight=None, check_input=True):
-        import numpy as np
+
 
         y_arr = np.asarray(y)
 
@@ -1600,20 +1604,7 @@ class PCTClassifier(DecisionTreeClassifier):
                 "PCT classification v1 requires target_y == clustering_y."
             )
 
-        y_arr = np.asarray(y)
 
-        # We treat missing labels as np.nan for numeric arrays.
-        # If your pipeline uses -1 sentinel, convert it to np.nan upstream (recommended).
-        if y_arr.ndim == 1:
-            y_arr = y_arr.reshape(-1, 1)
-
-        # Resolve roles BEFORE training so low-level induction can use them
-        self._pct_feature_roles = self._resolve_pct_feature_roles(X, y_arr)
-        self._pct_feature_roles_xy = self._split_resolved_roles_into_x_and_y(
-            self._pct_feature_roles
-        )
-
-        roles_xy = self._pct_feature_roles_xy
 
         if self.RemoveMissingTarget == "Yes":
             X, y_arr, sample_weight = _pct_apply_RemoveMissingTarget_yes(
@@ -2234,6 +2225,7 @@ class PCTRegressor(DecisionTreeRegressor):
         "clustering_features": ["array-like", None],
         "target_features": ["array-like", None],
         "RemoveMissingTarget": [StrOptions({"Yes", "No"})],
+        "ssl": [bool],
     }
 
     # new n.11 split position and tie break
@@ -2273,6 +2265,7 @@ class PCTRegressor(DecisionTreeRegressor):
         clustering_features=None,
         target_features=None,
         RemoveMissingTarget="No",
+        ssl=False,
 
     ):
         # 1) Store CLUS-specific parameters (required for sklearn estimator API)
@@ -2291,6 +2284,7 @@ class PCTRegressor(DecisionTreeRegressor):
         self.clustering_features = clustering_features
         self.target_features = target_features
         self.RemoveMissingTarget = RemoveMissingTarget
+        self.ssl = ssl
 
         # 2) Delegate standard tree params to DecisionTreeRegressor
         super().__init__(
@@ -2504,18 +2498,11 @@ class PCTRegressor(DecisionTreeRegressor):
                 "PCT regression v1 does not support descriptive_features that point "
                 "to y-columns. descriptive_y must be empty."
             )
-        y_arr = np.asarray(y, dtype=np.float64)
-        if y_arr.ndim == 1:
-            y_arr = y_arr.reshape(-1, 1)
 
-        self.ftest_level = self._resolve_ftest_level()
-
-        # Resolve combined [X | y] roles
-        self._pct_feature_roles = self._resolve_pct_feature_roles(X, y_arr)
-        self._pct_feature_roles_xy = self._split_resolved_roles_into_x_and_y(
-            self._pct_feature_roles
+        has_missing_target_rows = _pct_has_missing_target_rows(
+            y_arr,
+            roles_xy["target_y"],
         )
-        roles_xy = self._pct_feature_roles_xy
 
         if self.RemoveMissingTarget == "Yes":
             X, y_arr, sample_weight = _pct_apply_RemoveMissingTarget_yes(
@@ -2524,22 +2511,41 @@ class PCTRegressor(DecisionTreeRegressor):
                 target_y_indices=roles_xy["target_y"],
                 sample_weight=sample_weight,
             )
-        elif self.RemoveMissingTarget != "No":
+        elif self.RemoveMissingTarget == "No":
+            if has_missing_target_rows and not self.ssl and self.missing_target == "error":
+                raise ValueError(
+                    "Missing targets found with RemoveMissingTarget='No' and ssl=False. "
+                    "Either set RemoveMissingTarget='Yes' or ssl=True, or use "
+                    "missing_target='ignore'."
+                )
+        else:
             raise ValueError(
                 "RemoveMissingTarget must be either 'Yes' or 'No'. "
                 f"Got {self.RemoveMissingTarget!r}."
             )
+
+
         # Build clustering-view and target-view
         y_clust_raw, y_target_raw = self._build_pct_regression_views(X, y_arr, roles_xy)
 
         # Missingness is defined on target outputs only
         missing_mask_target = np.isnan(y_target_raw)
 
-        if self.missing_target == "error" and np.any(missing_mask_target):
+        if self.missing_target == "error" and np.any(missing_mask_target) and not self.ssl:
             raise ValueError(
                 "Missing targets found but missing_target='error'."
             )
-
+        if self.ssl:
+            if self.RemoveMissingTarget == "Yes":
+                # rows already dropped; continue normally
+                pass
+            else:
+                # SSL keeps rows with missing targets
+                # current v1 implementation uses:
+                # - y_clust_raw from X + available Y columns
+                # - default_model for missing target imputation in y_target_train
+                # - default_model for overlapping y_clust columns
+                pass
         # Default model per target = mean of observed values
         default_model = np.zeros(y_target_raw.shape[1], dtype=np.float64)
         for k in range(y_target_raw.shape[1]):
