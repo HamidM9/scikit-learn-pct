@@ -2514,9 +2514,9 @@ class PCTRegressor(DecisionTreeRegressor):
         elif self.RemoveMissingTarget == "No":
             if has_missing_target_rows and not self.ssl and self.missing_target == "error":
                 raise ValueError(
-                    "Missing targets found with RemoveMissingTarget='No' and ssl=False. "
-                    "Either set RemoveMissingTarget='Yes' or ssl=True, or use "
-                    "missing_target='ignore'."
+                    "Missing targets found but missing_target='error'. "
+                    "With RemoveMissingTarget='No' and ssl=False, either set "
+                    "RemoveMissingTarget='Yes' or ssl=True, or use missing_target='ignore'."
                 )
         else:
             raise ValueError(
