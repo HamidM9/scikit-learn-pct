@@ -1332,6 +1332,7 @@ class PCTClassifier(DecisionTreeClassifier):
         "split_position": [StrOptions({"midpoint", "clus_exact"})],
         "tie_break": [StrOptions({"sklearn", "clus"})],
         "RemoveMissingTarget": [StrOptions({"Yes", "No"})],
+        "ssl": [bool],
     }
 
     def __init__(
@@ -1359,6 +1360,7 @@ class PCTClassifier(DecisionTreeClassifier):
         clustering_features=None,
         target_features=None,
         RemoveMissingTarget="No",
+        ssl=False,
 
     ):
         self.compat_mode = compat_mode
@@ -1370,6 +1372,7 @@ class PCTClassifier(DecisionTreeClassifier):
         self.clustering_features = clustering_features
         self.target_features = target_features
         self.RemoveMissingTarget = RemoveMissingTarget
+        self.ssl = ssl
 
         super().__init__(
             criterion=criterion,
@@ -1550,13 +1553,9 @@ class PCTClassifier(DecisionTreeClassifier):
             y_target = y_target.reshape(-1, 1)
 
         return y_clust, y_target
+
     def fit(self, X, y, sample_weight=None, check_input=True):
-
-
-        y_arr = np.asarray(y)
-
-        # We treat missing labels as np.nan for numeric arrays.
-        # If your pipeline uses -1 sentinel, convert it to np.nan upstream (recommended).
+        y_arr = np.asarray(y, dtype=np.float64)
         if y_arr.ndim == 1:
             y_arr = y_arr.reshape(-1, 1)
 
@@ -1565,22 +1564,20 @@ class PCTClassifier(DecisionTreeClassifier):
         self._pct_feature_roles_xy = self._split_resolved_roles_into_x_and_y(
             self._pct_feature_roles
         )
-
         roles_xy = self._pct_feature_roles_xy
 
         # ------------------------------------------------------------------
         # Classification v1 restrictions
         # ------------------------------------------------------------------
-        # We only support:
+        # We support:
         #   - splits on X only
-        #   - impurity on Y only
         #   - prediction on Y only
-        #   - target_y == clustering_y
         #
-        # Reason:
-        # sklearn's current tree value layout is built from y outputs.
-        # Keeping target_y == clustering_y avoids changing tree_.value storage
-        # in the first patch.
+        # For SSL-style classification v1:
+        #   - descriptive_y must be empty
+        #   - target_x must be empty
+        #   - clustering_x must be empty for now
+        #   - target_y must equal clustering_y
         # ------------------------------------------------------------------
         if roles_xy["descriptive_y"].size != 0:
             raise NotImplementedError(
@@ -1599,12 +1596,16 @@ class PCTClassifier(DecisionTreeClassifier):
                 "PCT classification v1 does not support target_features "
                 "that point to X-columns. target_x must be empty."
             )
+
         if not np.array_equal(roles_xy["target_y"], roles_xy["clustering_y"]):
             raise NotImplementedError(
                 "PCT classification v1 requires target_y == clustering_y."
             )
 
-
+        has_missing_target_rows = _pct_has_missing_target_rows(
+            y_arr,
+            roles_xy["target_y"],
+        )
 
         if self.RemoveMissingTarget == "Yes":
             X, y_arr, sample_weight = _pct_apply_RemoveMissingTarget_yes(
@@ -1613,33 +1614,45 @@ class PCTClassifier(DecisionTreeClassifier):
                 target_y_indices=roles_xy["target_y"],
                 sample_weight=sample_weight,
             )
-        elif self.RemoveMissingTarget != "No":
+        elif self.RemoveMissingTarget == "No":
+            if has_missing_target_rows and not self.ssl and self.missing_target_attr_handling == "error":
+                raise ValueError(
+                    "Missing targets found but missing_target_attr_handling='error'. "
+                    "With RemoveMissingTarget='No' and ssl=False, either set "
+                    "RemoveMissingTarget='Yes' or ssl=True, or use a non-error "
+                    "missing_target_attr_handling policy."
+                )
+        else:
             raise ValueError(
                 "RemoveMissingTarget must be either 'Yes' or 'No'. "
                 f"Got {self.RemoveMissingTarget!r}."
             )
-        #pct
-        y_clust_raw, y_target_raw = self._build_pct_classification_views(X, y_arr, roles_xy)
-        missing_mask_target = (
-            np.isnan(y_target_raw)
-            if np.issubdtype(y_target_raw.dtype, np.floating)
-            else np.zeros_like(y_target_raw, dtype=bool)
-        )
 
-        if self.missing_target_attr_handling == "error" and np.any(missing_mask_target):
+        # Build clustering-view and target-view
+        y_clust_raw, y_target_raw = self._build_pct_classification_views(X, y_arr, roles_xy)
+
+        # Missingness is defined on target outputs only
+        missing_mask_target = np.isnan(y_target_raw)
+
+        if (
+                self.missing_target_attr_handling == "error"
+                and np.any(missing_mask_target)
+                and not self.ssl
+        ):
             raise ValueError(
                 "Missing targets found but missing_target_attr_handling='error'."
             )
 
-        default_model = np.zeros(y_target_raw.shape[1], dtype=int)
+        # Default model per target = majority class among observed values
+        default_model = np.zeros(y_target_raw.shape[1], dtype=np.intp)
         for k in range(y_target_raw.shape[1]):
             col = y_target_raw[:, k]
             obs = col[~missing_mask_target[:, k]]
             if obs.size == 0:
                 default_model[k] = 0
             else:
-                vals, cnts = np.unique(obs.astype(int), return_counts=True)
-                default_model[k] = int(vals[np.argmax(cnts)])
+                vals, counts = np.unique(obs.astype(np.intp), return_counts=True)
+                default_model[k] = vals[np.argmax(counts)]
 
         self._pct_default_model_ = default_model
         self._pct_missing_mask_ = missing_mask_target
@@ -1650,14 +1663,11 @@ class PCTClassifier(DecisionTreeClassifier):
         # Layout must match y_clust = [X[:, clustering_x] | y[:, clustering_y]]
         clust_missing_parts = []
 
-        # X-derived clustering columns are assumed fully observed here
         if roles_xy["clustering_x"].size:
             clust_missing_parts.append(
                 np.zeros((X.shape[0], roles_xy["clustering_x"].size), dtype=bool)
             )
 
-        # y-derived clustering columns inherit missingness only if that y-column is
-        # also part of target_y (so we have a corresponding missing_mask_target column)
         if roles_xy["clustering_y"].size:
             y_clust_missing = np.zeros(
                 (X.shape[0], roles_xy["clustering_y"].size), dtype=bool
@@ -1678,30 +1688,31 @@ class PCTClassifier(DecisionTreeClassifier):
 
         self._pct_missing_mask_clust_ = missing_mask_clust
 
-
-
+        # Training target view: impute target outputs for leaf statistics / predictions
         y_target_train = y_target_raw.copy()
         for k in range(y_target_train.shape[1]):
-            if np.any(missing_mask_target[:, k]):
-                y_target_train[missing_mask_target[:, k], k] = default_model[k]
-        y_target_train = y_target_train.astype(int)
+            miss = missing_mask_target[:, k]
+            if np.any(miss):
+                y_target_train[miss, k] = default_model[k]
 
+        # Classification must pass integer labels to the underlying sklearn path
+        y_target_train = y_target_train.astype(np.intp)
+
+        # Training clustering view: impute only overlapping y-derived clustering columns
         y_clust_train = y_clust_raw.copy()
-
-        # impute only the y-derived clustering part when it overlaps with target side
         n_cx = roles_xy["clustering_x"].size
-        for j, y_col in enumerate(roles_xy["clustering_y"]):
-            # position in y_clust_train is offset by n_cx
-            clust_pos = n_cx + j
 
-            # if this clustering y-column is also a target column, reuse its default model
+        for j, y_col in enumerate(roles_xy["clustering_y"]):
+            clust_pos = n_cx + j
             tgt_matches = np.where(roles_xy["target_y"] == y_col)[0]
             if tgt_matches.size:
                 tgt_k = int(tgt_matches[0])
                 miss = missing_mask_target[:, tgt_k]
                 if np.any(miss):
                     y_clust_train[miss, clust_pos] = default_model[tgt_k]
-#pct style
+
+        y_clust_train = y_clust_train.astype(np.intp)
+
         self._fit(
             X,
             y_target_train if y_target_train.shape[1] > 1 else y_target_train.ravel(),
@@ -1710,18 +1721,12 @@ class PCTClassifier(DecisionTreeClassifier):
             pct_y_clust=y_clust_train,
         )
 
-
-        tie_break_mode = 1 if self.tie_break == "clus" else 0
-        split_position_mode = 1 if self.split_position == "clus_exact" else 0
-
-        # build per-node "has observed for target k" metadata using ORIGINAL target mask
-        path = self.decision_path(X, check_input=check_input)  # CSR (n_samples, n_nodes)
+        # Build per-node "has observed for target k" metadata using ORIGINAL target mask
+        path = self.decision_path(X, check_input=check_input)
         n_nodes = self.tree_.node_count
         n_outputs = y_target_train.shape[1]
 
         node_has_obs = np.zeros((n_nodes, n_outputs), dtype=bool)
-
-        # missing_mask_target is shape (n_samples, n_outputs) for TARGET outputs only
         obs_mask = ~missing_mask_target
 
         for i in range(X.shape[0]):
@@ -1732,7 +1737,7 @@ class PCTClassifier(DecisionTreeClassifier):
         self._pct_node_has_obs_ = node_has_obs
         self._pct_node_has_observed_ = node_has_obs
 
-        # parent pointers for parent_node fallback
+        # Parent pointers for parent_node fallback
         children_left = self.tree_.children_left
         children_right = self.tree_.children_right
         parent = np.full(n_nodes, -1, dtype=np.int64)
@@ -1744,8 +1749,8 @@ class PCTClassifier(DecisionTreeClassifier):
             if cr != -1:
                 parent[cr] = p
         self._pct_parent_ = parent
-        return self
 
+        return self
 
     def _fit_pct(self, X, y, sample_weight=None, check_input=True):
         # delegate to the standard sklearn training pipeline
