@@ -85,6 +85,7 @@ CRITERIA_REG = {
     "test_criterion": _criterion.TestCriterionRegression,
     "svars": _criterion.SVarS,
     "svars_weighted": _criterion.SVarSWeighted,
+    "ssl_svars": _criterion.SSLSVarS,
 }
 
 DENSE_SPLITTERS = {"best": _splitter.BestSplitter, "random": _splitter.RandomSplitter}
@@ -2231,6 +2232,11 @@ class PCTRegressor(DecisionTreeRegressor):
         "target_features": ["array-like", None],
         "RemoveMissingTarget": [StrOptions({"Yes", "No"})],
         "ssl": [bool],
+        "ssl_method": [StrOptions({"none", "clus_pct"})],
+        "ssl_weight": [Interval(Real, 0.0, 1.0, closed="both"), None],
+        "ssl_possible_weights": ["array-like", None],
+        "ssl_internal_folds": [Interval(Integral, 2, None, closed="left")],
+        "ssl_pruning_when_tuning": [bool],
     }
 
     # new n.11 split position and tie break
@@ -2271,6 +2277,11 @@ class PCTRegressor(DecisionTreeRegressor):
         target_features=None,
         RemoveMissingTarget="No",
         ssl=False,
+        ssl_method="none",
+        ssl_weight=None,
+        ssl_possible_weights=None,
+        ssl_internal_folds=3,
+        ssl_pruning_when_tuning=False,
 
     ):
         # 1) Store CLUS-specific parameters (required for sklearn estimator API)
@@ -2290,6 +2301,11 @@ class PCTRegressor(DecisionTreeRegressor):
         self.target_features = target_features
         self.RemoveMissingTarget = RemoveMissingTarget
         self.ssl = ssl
+        self.ssl_method = ssl_method
+        self.ssl_weight = ssl_weight
+        self.ssl_possible_weights = ssl_possible_weights
+        self.ssl_internal_folds = ssl_internal_folds
+        self.ssl_pruning_when_tuning = ssl_pruning_when_tuning
 
         # 2) Delegate standard tree params to DecisionTreeRegressor
         super().__init__(
@@ -2483,6 +2499,142 @@ class PCTRegressor(DecisionTreeRegressor):
             y_target = y_target.reshape(-1, 1)
 
         return y_clust, y_target
+
+    def _resolve_ssl_weight_grid(self):
+        import numpy as np
+
+        if not self.ssl or self.ssl_method == "none":
+            return None
+
+        if self.ssl_method != "clus_pct":
+            raise ValueError(
+                "ssl_method must be one of {'none', 'clus_pct'}."
+            )
+
+        if self.ssl_possible_weights is not None:
+            grid = np.asarray(self.ssl_possible_weights, dtype=float)
+            if grid.ndim != 1 or grid.size == 0:
+                raise ValueError("ssl_possible_weights must be a non-empty 1D array-like.")
+            if np.any(grid < 0.0) or np.any(grid > 1.0):
+                raise ValueError("ssl_possible_weights must lie in [0, 1].")
+            return grid
+
+        if self.ssl_weight is not None:
+            w = float(self.ssl_weight)
+            if not (0.0 <= w <= 1.0):
+                raise ValueError("ssl_weight must lie in [0, 1].")
+            return np.asarray([w], dtype=float)
+
+        return np.asarray([1.0, 0.75, 0.5, 0.25, 0.0], dtype=float)
+    def _select_ssl_weight_via_internal_cv(
+        self,
+        X,
+        y_arr,
+        sample_weight,
+        *,
+        check_input,
+        roles_xy,
+        y_clust_raw,
+        y_target_raw,
+        missing_mask_target,
+    ):
+        import numpy as np
+        from sklearn.model_selection import KFold
+        from sklearn.metrics import mean_squared_error
+
+        grid = self._resolve_ssl_weight_grid()
+        if grid is None:
+            return None
+
+        if grid.size == 1:
+            return float(grid[0])
+
+        labeled_rows = ~np.any(missing_mask_target, axis=1)
+        labeled_idx = np.flatnonzero(labeled_rows)
+
+        if labeled_idx.size < self.ssl_internal_folds:
+            # not enough labeled rows for internal CV
+            return float(grid[-1])
+
+        cv = KFold(
+            n_splits=self.ssl_internal_folds,
+            shuffle=True,
+            random_state=self.random_state,
+        )
+
+        best_w = None
+        best_score = np.inf
+
+        unlabeled_idx = np.flatnonzero(~labeled_rows)
+
+        for w in grid:
+            fold_scores = []
+
+            for train_sub, valid_sub in cv.split(labeled_idx):
+                train_lab_idx = labeled_idx[train_sub]
+                valid_lab_idx = labeled_idx[valid_sub]
+
+                if w != 1.0:
+                    fit_idx = np.concatenate([train_lab_idx, unlabeled_idx])
+                else:
+                    fit_idx = train_lab_idx
+
+                X_fit = X[fit_idx]
+                y_fit = y_arr[fit_idx]
+                sw_fit = None if sample_weight is None else sample_weight[fit_idx]
+
+                model = self.__class__(
+                    criterion="ssl_svars",
+                    splitter=self.splitter,
+                    split_position=self.split_position,
+                    tie_break=self.tie_break,
+                    max_depth=self.max_depth,
+                    min_samples_split=self.min_samples_split,
+                    min_samples_leaf=self.min_samples_leaf,
+                    min_weight_fraction_leaf=self.min_weight_fraction_leaf,
+                    max_features=self.max_features,
+                    random_state=self.random_state,
+                    max_leaf_nodes=self.max_leaf_nodes,
+                    min_impurity_decrease=self.min_impurity_decrease,
+                    ccp_alpha=self.ccp_alpha,
+                    monotonic_cst=self.monotonic_cst,
+                    missing_clustering_attr_handling=self.missing_clustering_attr_handling,
+                    compat_mode=self.compat_mode,
+                    target_weights=self.target_weights,
+                    missing_target=self.missing_target,
+                    missing_target_policy=self.missing_target_policy,
+                    leaf_model=self.leaf_model,
+                    pruning=self.pruning,
+                    ftest=self.ftest,
+                    missing_target_attr_handling=self.missing_target_attr_handling,
+                    descriptive_features=self.descriptive_features,
+                    clustering_features=self.clustering_features,
+                    target_features=self.target_features,
+                    RemoveMissingTarget="No",
+                    ssl=True,
+                    ssl_method="clus_pct",
+                    ssl_weight=float(w),
+                    ssl_possible_weights=None,
+                    ssl_internal_folds=self.ssl_internal_folds,
+                    ssl_pruning_when_tuning=self.ssl_pruning_when_tuning,
+                )
+
+                model.fit(X_fit, y_fit, sample_weight=sw_fit, check_input=check_input)
+
+                X_val = X[valid_lab_idx]
+                y_val = y_arr[valid_lab_idx][:, roles_xy["target_y"]]
+                pred = model.predict(X_val, check_input=check_input)
+                if pred.ndim == 1:
+                    pred = pred.reshape(-1, 1)
+
+                fold_scores.append(mean_squared_error(y_val, pred))
+
+            score = float(np.mean(fold_scores))
+            if score <= best_score:
+                best_score = score
+                best_w = float(w)
+
+        return best_w
     def fit(self, X, y, sample_weight=None, check_input=True):
         y_arr = np.asarray(y, dtype=np.float64)
         if y_arr.ndim == 1:
@@ -2611,17 +2763,61 @@ class PCTRegressor(DecisionTreeRegressor):
                 miss = missing_mask_target[:, tgt_k]
                 if np.any(miss):
                     y_clust_train[miss, clust_pos] = default_model[tgt_k]
+        use_ssl_pct = bool(self.ssl) and self.ssl_method == "clus_pct"
 
+        if use_ssl_pct:
+            ssl_weight = self._select_ssl_weight_via_internal_cv(
+                X,
+                y_arr,
+                sample_weight,
+                check_input=check_input,
+                roles_xy=roles_xy,
+                y_clust_raw=y_clust_raw,
+                y_target_raw=y_target_raw,
+                missing_mask_target=missing_mask_target,
+            )
+            self.ssl_weight_ = float(ssl_weight)
+        else:
+            self.ssl_weight_ = None
         # Fit:
         # - split criterion sees y_clust_train
         # - leaf value sees y_target_train
-        self._fit(
-            X,
-            y_target_train if y_target_train.shape[1] > 1 else y_target_train.ravel(),
-            sample_weight=sample_weight,
-            check_input=check_input,
-            pct_y_clust=y_clust_train,
-        )
+        fit_y_value = y_target_train if y_target_train.shape[1] > 1 else y_target_train.ravel()
+
+        old_criterion = self.criterion
+        old_target_weights = self.target_weights
+
+        if use_ssl_pct:
+            self.criterion = "svars_weighted"
+
+            n_cx = roles_xy["clustering_x"].size
+            n_cy = roles_xy["clustering_y"].size
+            n_total = n_cx + n_cy
+
+            if n_total == 0:
+                raise ValueError("SSL-PCT requires at least one clustering attribute.")
+
+            weights = np.empty(n_total, dtype=np.float64)
+
+            if n_cx > 0:
+                weights[:n_cx] = (1.0 - self.ssl_weight_) * (n_total / n_cx)
+            if n_cy > 0:
+                weights[n_cx:] = self.ssl_weight_ * (n_total / n_cy)
+
+            self.target_weights = weights
+            self._pct_ssl_column_weights_ = weights.copy()
+
+        try:
+            self._fit(
+                X,
+                fit_y_value,
+                sample_weight=sample_weight,
+                check_input=check_input,
+                pct_y_clust=y_clust_train,
+            )
+        finally:
+            self.criterion = old_criterion
+            self.target_weights = old_target_weights
 
         # Per-node "has observed target?" metadata built from ORIGINAL target missingness
         path = self.decision_path(X, check_input=check_input)

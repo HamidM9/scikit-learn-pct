@@ -1861,7 +1861,23 @@ cdef class SVarSWeighted(RegressionCriterion):
 
 
 
+cdef class SSLSVarS(SVarSWeighted):
+    """SSL mixed CLUS-style variance criterion.
 
+    This criterion itself does not know which columns are descriptive or target.
+    It only assumes that the caller packed the clustering view as:
+
+        [X_clust | Y_clust]
+
+    and passed CLUS-style per-column weights through target_weights:
+    - descriptive clustering columns scaled by (1 - w) * C / Dx
+    - target clustering columns scaled by w * C / Ty
+
+    Then weighted variance over the packed clustering view reproduces
+    the CLUS SSL split heuristic up to the same normalization logic used
+    by the caller.
+    """
+    pass
 
 
 
