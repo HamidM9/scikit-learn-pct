@@ -2280,7 +2280,7 @@ class PCTRegressor(DecisionTreeRegressor):
         ssl_method="none",
         ssl_weight=None,
         ssl_possible_weights=None,
-        ssl_internal_folds=3,
+        ssl_internal_folds=4,
         ssl_pruning_when_tuning=False,
 
     ):
@@ -2500,6 +2500,138 @@ class PCTRegressor(DecisionTreeRegressor):
 
         return y_clust, y_target
 
+    def _resolve_ssl_weight_grid(self):
+        if not self.ssl or self.ssl_method == "none":
+            return None
+
+        if self.ssl_method != "clus_pct":
+            raise ValueError("ssl_method must be one of {'none', 'clus_pct'}.")
+
+        if self.ssl_possible_weights is not None:
+            grid = np.asarray(self.ssl_possible_weights, dtype=np.float64)
+            if grid.ndim != 1 or grid.size == 0:
+                raise ValueError(
+                    "ssl_possible_weights must be a non-empty 1D array-like."
+                )
+            if np.any(grid < 0.0) or np.any(grid > 1.0):
+                raise ValueError("ssl_possible_weights must lie in [0, 1].")
+            return grid
+
+        if self.ssl_weight is not None:
+            w = float(self.ssl_weight)
+            if not (0.0 <= w <= 1.0):
+                raise ValueError("ssl_weight must lie in [0, 1].")
+            return np.asarray([w], dtype=np.float64)
+
+        return np.asarray([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0], dtype=np.float64)
+    def _select_ssl_weight_via_internal_cv(
+        self,
+        X,
+        y_arr,
+        sample_weight,
+        *,
+        check_input,
+        roles_xy,
+        y_clust_raw,
+        y_target_raw,
+        missing_mask_target,
+    ):
+        from sklearn.metrics import mean_squared_error
+        from sklearn.model_selection import KFold
+
+        grid = self._resolve_ssl_weight_grid()
+        if grid is None:
+            return None
+
+        if grid.size == 1:
+            return float(grid[0])
+
+        labeled_rows = ~np.any(missing_mask_target, axis=1)
+        labeled_idx = np.flatnonzero(labeled_rows)
+        unlabeled_idx = np.flatnonzero(~labeled_rows)
+
+        if labeled_idx.size < self.ssl_internal_folds:
+            # fallback: not enough labeled rows for internal CV
+            return float(grid[-1])
+
+        cv = KFold(
+            n_splits=self.ssl_internal_folds,
+            shuffle=True,
+            random_state=self.random_state,
+        )
+
+        best_w = None
+        best_score = np.inf
+
+        for w in grid:
+            scores = []
+
+            for tr_sub, va_sub in cv.split(labeled_idx):
+                train_lab_idx = labeled_idx[tr_sub]
+                valid_lab_idx = labeled_idx[va_sub]
+
+                if np.isclose(w, 1.0):
+                    fit_idx = train_lab_idx
+                else:
+                    fit_idx = np.concatenate([train_lab_idx, unlabeled_idx])
+
+                X_fit = X[fit_idx]
+                y_fit = y_arr[fit_idx]
+                sw_fit = None if sample_weight is None else sample_weight[fit_idx]
+
+                est = self.__class__(
+                    criterion=self.criterion,
+                    splitter=self.splitter,
+                    split_position=self.split_position,
+                    tie_break=self.tie_break,
+                    max_depth=self.max_depth,
+                    min_samples_split=self.min_samples_split,
+                    min_samples_leaf=self.min_samples_leaf,
+                    min_weight_fraction_leaf=self.min_weight_fraction_leaf,
+                    max_features=self.max_features,
+                    random_state=self.random_state,
+                    max_leaf_nodes=self.max_leaf_nodes,
+                    min_impurity_decrease=self.min_impurity_decrease,
+                    ccp_alpha=self.ccp_alpha,
+                    monotonic_cst=self.monotonic_cst,
+                    missing_clustering_attr_handling=self.missing_clustering_attr_handling,
+                    compat_mode=self.compat_mode,
+                    target_weights=None,
+                    missing_target=self.missing_target,
+                    missing_target_policy=self.missing_target_policy,
+                    leaf_model=self.leaf_model,
+                    pruning=self.pruning,
+                    ftest=self.ftest,
+                    missing_target_attr_handling=self.missing_target_attr_handling,
+                    descriptive_features=self.descriptive_features,
+                    clustering_features=self.clustering_features,
+                    target_features=self.target_features,
+                    RemoveMissingTarget=self.RemoveMissingTarget,
+                    ssl=True,
+                    ssl_method="clus_pct",
+                    ssl_weight=float(w),
+                    ssl_possible_weights=None,
+                    ssl_internal_folds=self.ssl_internal_folds,
+                    ssl_pruning_when_tuning=self.ssl_pruning_when_tuning,
+                )
+
+                est.fit(X_fit, y_fit, sample_weight=sw_fit, check_input=check_input)
+
+                X_val = X[valid_lab_idx]
+                y_val = y_arr[valid_lab_idx][:, roles_xy["target_y"]]
+                pred = est.predict(X_val, check_input=check_input)
+                pred = np.asarray(pred)
+                if pred.ndim == 1:
+                    pred = pred.reshape(-1, 1)
+
+                scores.append(mean_squared_error(y_val, pred))
+
+            score = float(np.mean(scores))
+            if score <= best_score:
+                best_score = score
+                best_w = float(w)
+
+        return best_w
     def _resolve_ssl_weight_grid(self):
         import numpy as np
 
@@ -2779,10 +2911,24 @@ class PCTRegressor(DecisionTreeRegressor):
             self.ssl_weight_ = float(ssl_weight)
         else:
             self.ssl_weight_ = None
+        # CLUS-like behavior: when w = 1, do not let unlabeled rows affect fitting
+        fit_rows = np.arange(X.shape[0], dtype=np.intp)
+
+        if use_ssl_pct and np.isclose(self.ssl_weight_, 1.0):
+            fit_rows = np.flatnonzero(~np.any(missing_mask_target, axis=1))
+
+        X_fit = X[fit_rows]
+        sample_weight_fit = None if sample_weight is None else sample_weight[fit_rows]
+        y_target_train_fit = y_target_train[fit_rows]
+        y_clust_train_fit = y_clust_train[fit_rows]
         # Fit:
         # - split criterion sees y_clust_train
         # - leaf value sees y_target_train
-        fit_y_value = y_target_train if y_target_train.shape[1] > 1 else y_target_train.ravel()
+        fit_y_value = (
+            y_target_train_fit
+            if y_target_train_fit.shape[1] > 1
+            else y_target_train_fit.ravel()
+        )
 
         old_criterion = self.criterion
         old_target_weights = self.target_weights
@@ -2809,11 +2955,11 @@ class PCTRegressor(DecisionTreeRegressor):
 
         try:
             self._fit(
-                X,
+                X_fit,
                 fit_y_value,
-                sample_weight=sample_weight,
+                sample_weight=sample_weight_fit,
                 check_input=check_input,
-                pct_y_clust=y_clust_train,
+                pct_y_clust=y_clust_train_fit,
             )
         finally:
             self.criterion = old_criterion
@@ -2826,6 +2972,8 @@ class PCTRegressor(DecisionTreeRegressor):
 
         node_has_obs = np.zeros((n_nodes, n_outputs), dtype=bool)
         obs_mask = ~missing_mask_target
+
+
 
         for i in range(X.shape[0]):
             node_ids = path.indices[path.indptr[i]: path.indptr[i + 1]]
