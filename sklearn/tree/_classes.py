@@ -1334,6 +1334,12 @@ class PCTClassifier(DecisionTreeClassifier):
         "tie_break": [StrOptions({"sklearn", "clus"})],
         "RemoveMissingTarget": [StrOptions({"Yes", "No"})],
         "ssl": [bool],
+        "ssl_method": [StrOptions({"none", "clus_pct"})],
+        "ssl_weight": [Interval(Real, 0.0, 1.0, closed="both"), None],
+        "ssl_possible_weights": ["array-like", None],
+        "ssl_internal_folds": [Interval(Integral, 2, None, closed="left")],
+        "ssl_pruning_when_tuning": [bool],
+
     }
 
     def __init__(
@@ -1362,6 +1368,11 @@ class PCTClassifier(DecisionTreeClassifier):
         target_features=None,
         RemoveMissingTarget="No",
         ssl=False,
+        ssl_method="none",
+        ssl_weight=None,
+        ssl_possible_weights=None,
+        ssl_internal_folds=4,
+        ssl_pruning_when_tuning=False,
 
     ):
         self.compat_mode = compat_mode
@@ -1374,6 +1385,11 @@ class PCTClassifier(DecisionTreeClassifier):
         self.target_features = target_features
         self.RemoveMissingTarget = RemoveMissingTarget
         self.ssl = ssl
+        self.ssl_method = ssl_method
+        self.ssl_weight = ssl_weight
+        self.ssl_possible_weights = ssl_possible_weights
+        self.ssl_internal_folds = ssl_internal_folds
+        self.ssl_pruning_when_tuning = ssl_pruning_when_tuning
 
         super().__init__(
             criterion=criterion,
@@ -1554,7 +1570,135 @@ class PCTClassifier(DecisionTreeClassifier):
             y_target = y_target.reshape(-1, 1)
 
         return y_clust, y_target
+    def _resolve_ssl_weight_grid(self):
+        if not self.ssl or self.ssl_method == "none":
+            return None
 
+        if self.ssl_method != "clus_pct":
+            raise ValueError("ssl_method must be one of {'none', 'clus_pct'}.")
+
+        if self.ssl_possible_weights is not None:
+            grid = np.asarray(self.ssl_possible_weights, dtype=np.float64)
+            if grid.ndim != 1 or grid.size == 0:
+                raise ValueError(
+                    "ssl_possible_weights must be a non-empty 1D array-like."
+                )
+            if np.any(grid < 0.0) or np.any(grid > 1.0):
+                raise ValueError("ssl_possible_weights must lie in [0, 1].")
+            return grid
+
+        if self.ssl_weight is not None:
+            w = float(self.ssl_weight)
+            if not (0.0 <= w <= 1.0):
+                raise ValueError("ssl_weight must lie in [0, 1].")
+            return np.asarray([w], dtype=np.float64)
+
+        return np.asarray(
+            [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            dtype=np.float64,
+        )
+    def _select_ssl_weight_via_internal_cv(
+        self,
+        X,
+        y_arr,
+        sample_weight,
+        *,
+        check_input,
+        roles_xy,
+        y_clust_raw,
+        y_target_raw,
+        missing_mask_target,
+    ):
+        from sklearn.metrics import accuracy_score
+        from sklearn.model_selection import KFold
+
+        grid = self._resolve_ssl_weight_grid()
+        if grid is None:
+            return None
+
+        if grid.size == 1:
+            return float(grid[0])
+
+        labeled_rows = ~np.any(missing_mask_target, axis=1)
+        labeled_idx = np.flatnonzero(labeled_rows)
+        unlabeled_idx = np.flatnonzero(~labeled_rows)
+
+        if labeled_idx.size < self.ssl_internal_folds:
+            return float(grid[-1])
+
+        cv = KFold(
+            n_splits=self.ssl_internal_folds,
+            shuffle=True,
+            random_state=self.random_state,
+        )
+
+        best_w = None
+        best_score = -np.inf
+
+        for w in grid:
+            scores = []
+
+            for tr_sub, va_sub in cv.split(labeled_idx):
+                train_lab_idx = labeled_idx[tr_sub]
+                valid_lab_idx = labeled_idx[va_sub]
+
+                if np.isclose(w, 1.0):
+                    fit_idx = train_lab_idx
+                else:
+                    fit_idx = np.concatenate([train_lab_idx, unlabeled_idx])
+
+                X_fit = X[fit_idx]
+                y_fit = y_arr[fit_idx]
+                sw_fit = None if sample_weight is None else sample_weight[fit_idx]
+
+                est = self.__class__(
+                    criterion=self.criterion,
+                    splitter=self.splitter,
+                    split_position=self.split_position,
+                    tie_break=self.tie_break,
+                    max_depth=self.max_depth,
+                    min_samples_split=self.min_samples_split,
+                    min_samples_leaf=self.min_samples_leaf,
+                    min_weight_fraction_leaf=self.min_weight_fraction_leaf,
+                    max_features=self.max_features,
+                    random_state=self.random_state,
+                    max_leaf_nodes=self.max_leaf_nodes,
+                    min_impurity_decrease=self.min_impurity_decrease,
+                    class_weight=self.class_weight,
+                    ccp_alpha=self.ccp_alpha,
+                    monotonic_cst=self.monotonic_cst,
+                    compat_mode=self.compat_mode,
+                    target_weights=None,
+                    missing_target_attr_handling=self.missing_target_attr_handling,
+                    descriptive_features=self.descriptive_features,
+                    clustering_features=self.clustering_features,
+                    target_features=self.target_features,
+                    RemoveMissingTarget=self.RemoveMissingTarget,
+                    ssl=True,
+                    ssl_method="clus_pct",
+                    ssl_weight=float(w),
+                    ssl_possible_weights=None,
+                    ssl_internal_folds=self.ssl_internal_folds,
+                    ssl_pruning_when_tuning=self.ssl_pruning_when_tuning,
+                )
+
+                est.fit(X_fit, y_fit, sample_weight=sw_fit, check_input=check_input)
+
+                X_val = X[valid_lab_idx]
+                y_val = y_arr[valid_lab_idx][:, roles_xy["target_y"]]
+                pred = est.predict(X_val, check_input=check_input)
+                pred = np.asarray(pred)
+                if pred.ndim == 1:
+                    pred = pred.reshape(-1, 1)
+
+                scores.append(accuracy_score(y_val.ravel(), pred.ravel()))
+
+            score = float(np.mean(scores))
+            if score >= best_score:
+                best_score = score
+                best_w = float(w)
+
+        return best_w
     def fit(self, X, y, sample_weight=None, check_input=True):
         y_arr = np.asarray(y, dtype=np.float64)
         if y_arr.ndim == 1:
@@ -1574,11 +1718,13 @@ class PCTClassifier(DecisionTreeClassifier):
         #   - splits on X only
         #   - prediction on Y only
         #
-        # For SSL-style classification v1:
+        # For classification v1:
         #   - descriptive_y must be empty
         #   - target_x must be empty
-        #   - clustering_x must be empty for now
-        #   - target_y must equal clustering_y
+        #   - in supervised mode, clustering_x must be empty
+        #   - in supervised mode, target_y must equal clustering_y
+        #   - in SSL mode, clustering_x is allowed
+
         # ------------------------------------------------------------------
         if roles_xy["descriptive_y"].size != 0:
             raise NotImplementedError(
@@ -1586,10 +1732,10 @@ class PCTClassifier(DecisionTreeClassifier):
                 "that point to y-columns. descriptive_y must be empty."
             )
 
-        if roles_xy["clustering_x"].size != 0:
+        if roles_xy["clustering_x"].size != 0 and not self.ssl:
             raise NotImplementedError(
-                "PCT classification v1 does not support clustering_features "
-                "that point to X-columns. clustering_x must be empty."
+                "Supervised PCT classification v1 does not support clustering_features "
+                "that point to X-columns. For SSL classification, clustering_x is allowed."
             )
 
         if roles_xy["target_x"].size != 0:
@@ -1598,30 +1744,35 @@ class PCTClassifier(DecisionTreeClassifier):
                 "that point to X-columns. target_x must be empty."
             )
 
-        if not np.array_equal(roles_xy["target_y"], roles_xy["clustering_y"]):
-            raise NotImplementedError(
-                "PCT classification v1 requires target_y == clustering_y."
-            )
+        if not self.ssl:
+            if not np.array_equal(roles_xy["target_y"], roles_xy["clustering_y"]):
+                raise NotImplementedError(
+                    "Supervised PCT classification v1 requires target_y == clustering_y."
+                )
 
-        has_missing_target_rows = _pct_has_missing_target_rows(
-            y_arr,
-            roles_xy["target_y"],
-        )
+
+        y_target_raw = np.asarray(y_arr[:, roles_xy["target_y"]], dtype=np.float64)
+        if y_target_raw.ndim == 1:
+            y_target_raw = y_target_raw.reshape(-1, 1)
+
+        missing_mask_target = np.isnan(y_target_raw)
+        has_missing_target_rows = np.any(missing_mask_target)
 
         if self.RemoveMissingTarget == "Yes":
-            X, y_arr, sample_weight = _pct_apply_RemoveMissingTarget_yes(
-                X,
-                y_arr,
-                target_y_indices=roles_xy["target_y"],
-                sample_weight=sample_weight,
-            )
+            keep = ~np.any(missing_mask_target, axis=1)
+            X = X[keep]
+            y_arr = y_arr[keep]
+            if sample_weight is not None:
+                sample_weight = np.asarray(sample_weight)[keep]
+
+            y_target_raw = y_target_raw[keep]
+            missing_mask_target = missing_mask_target[keep]
+
         elif self.RemoveMissingTarget == "No":
-            if has_missing_target_rows and not self.ssl and self.missing_target_attr_handling == "error":
+            if has_missing_target_rows and not self.ssl:
                 raise ValueError(
-                    "Missing targets found but missing_target_attr_handling='error'. "
-                    "With RemoveMissingTarget='No' and ssl=False, either set "
-                    "RemoveMissingTarget='Yes' or ssl=True, or use a non-error "
-                    "missing_target_attr_handling policy."
+                    "Missing classification targets found. "
+                    "Use RemoveMissingTarget='Yes' or ssl=True."
                 )
         else:
             raise ValueError(
@@ -1714,13 +1865,72 @@ class PCTClassifier(DecisionTreeClassifier):
 
         y_clust_train = y_clust_train.astype(np.intp)
 
-        self._fit(
-            X,
-            y_target_train if y_target_train.shape[1] > 1 else y_target_train.ravel(),
-            sample_weight=sample_weight,
-            check_input=check_input,
-            pct_y_clust=y_clust_train,
-        )
+        use_ssl_pct = bool(self.ssl) and self.ssl_method == "clus_pct"
+
+        if use_ssl_pct:
+            self.ssl_weight_ = float(
+                self._select_ssl_weight_via_internal_cv(
+                    X,
+                    y_arr,
+                    sample_weight,
+                    check_input=check_input,
+                    roles_xy=roles_xy,
+                    y_clust_raw=y_clust_raw,
+                    y_target_raw=y_target_raw,
+                    missing_mask_target=missing_mask_target,
+                )
+            )
+        else:
+            self.ssl_weight_ = None
+
+        fit_rows = np.arange(X.shape[0], dtype=np.intp)
+
+        if use_ssl_pct and np.isclose(self.ssl_weight_, 1.0):
+            fit_rows = np.flatnonzero(~np.any(missing_mask_target, axis=1))
+
+        X_fit = X[fit_rows]
+        sample_weight_fit = None if sample_weight is None else sample_weight[fit_rows]
+        y_target_train_fit = y_target_train[fit_rows]
+        y_clust_train_fit = y_clust_train[fit_rows]
+
+        old_target_weights = self.target_weights
+
+        try:
+            if use_ssl_pct:
+                n_cx = roles_xy["clustering_x"].size
+                n_cy = roles_xy["clustering_y"].size
+                n_total = n_cx + n_cy
+
+                if n_total == 0:
+                    raise ValueError(
+                        "SSL-PCT classification requires at least one clustering attribute."
+                    )
+
+                weights = np.empty(n_total, dtype=np.float64)
+
+                if n_cx > 0:
+                    weights[:n_cx] = (1.0 - self.ssl_weight_) * (n_total / n_cx)
+                if n_cy > 0:
+                    weights[n_cx:] = self.ssl_weight_ * (n_total / n_cy)
+
+                self.target_weights = weights
+                self._pct_ssl_column_weights_ = weights.copy()
+
+            fit_y_value = (
+                y_target_train_fit
+                if y_target_train_fit.shape[1] > 1
+                else y_target_train_fit.ravel()
+            )
+
+            self._fit(
+                X_fit,
+                fit_y_value,
+                sample_weight=sample_weight_fit,
+                check_input=check_input,
+                pct_y_clust=y_clust_train_fit,
+            )
+        finally:
+            self.target_weights = old_target_weights
 
         # Build per-node "has observed for target k" metadata using ORIGINAL target mask
         path = self.decision_path(X, check_input=check_input)
