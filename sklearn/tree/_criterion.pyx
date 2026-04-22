@@ -470,6 +470,7 @@ cdef class ClassificationCriterion(Criterion):
             self.weighted_n_missing += w
 
     cdef int reset(self) except -1 nogil:
+
         """Reset the criterion at pos=start.
 
         Returns -1 in case of failure to allocate memory (and raise MemoryError)
@@ -1234,9 +1235,18 @@ cdef class RegressionCriterion(Criterion):
         self.sum_total = np.zeros(n_outputs, dtype=np.float64)
         self.sum_left = np.zeros(n_outputs, dtype=np.float64)
         self.sum_right = np.zeros(n_outputs, dtype=np.float64)
-        # new n.8 weighted svars
+
+        # per-output observed-weight counters for native missing-target handling
+        self.sum_w_total = np.zeros(n_outputs, dtype=np.float64)
+        self.sum_w_left = np.zeros(n_outputs, dtype=np.float64)
+        self.sum_w_right = np.zeros(n_outputs, dtype=np.float64)
+        self.sum_w_missing = np.zeros(n_outputs, dtype=np.float64)
+
+        # per-output squared sums
         self.sq_sum_total_per_output = np.zeros(n_outputs, dtype=np.float64)
         self._sq_sum_left_buf = np.zeros(n_outputs, dtype=np.float64)
+
+        self._has_y_missing = False
 
     def __reduce__(self):
         return (type(self), (self.n_outputs, self.n_samples), self.__getstate__())
@@ -1273,7 +1283,8 @@ cdef class RegressionCriterion(Criterion):
         cdef float64_t w = 1.0
         self.sq_sum_total = 0.0
         memset(&self.sum_total[0], 0, self.n_outputs * sizeof(float64_t))
-        memset(&self.sq_sum_total_per_output[0], 0, self.n_outputs * sizeof(float64_t)) # new n.8 weighted svars
+        memset(&self.sum_w_total[0], 0, self.n_outputs * sizeof(float64_t))
+        memset(&self.sq_sum_total_per_output[0], 0, self.n_outputs * sizeof(float64_t))
 
         for p in range(start, end):
             i = sample_indices[p]
@@ -1282,20 +1293,32 @@ cdef class RegressionCriterion(Criterion):
                 w = sample_weight[i]
 
             for k in range(self.n_outputs):
+                if self._has_y_missing and self._y_missing[i, k]:
+                    continue
+
                 y_ik = self.y[i, k]
                 w_y_ik = w * y_ik
                 self.sum_total[k] += w_y_ik
+                self.sum_w_total[k] += w
                 self.sq_sum_total += w_y_ik * y_ik
-                self.sq_sum_total_per_output[k] += w_y_ik * y_ik # new n.8 weighted svars
+                self.sq_sum_total_per_output[k] += w_y_ik * y_ik
+
             self.weighted_n_node_samples += w
 
         # Reset to pos=start
         self.reset()
         return 0
 
+    cpdef set_y_missing_mask(self, object y_missing):
+        cdef cnp.ndarray[cnp.uint8_t, ndim=2, mode="c"] arr
+        arr = np.asarray(y_missing, dtype=np.uint8, order="C")
+        self._y_missing = arr
+        self._has_y_missing = True
+
     cdef void init_sum_missing(self):
         """Init sum_missing to hold sums for missing values."""
         self.sum_missing = np.zeros(self.n_outputs, dtype=np.float64)
+        self.sum_w_missing = np.zeros(self.n_outputs, dtype=np.float64)
 
     cdef void init_missing(self, intp_t n_missing) noexcept nogil:
         """Initialize sum_missing if there are missing values.
@@ -1313,6 +1336,7 @@ cdef class RegressionCriterion(Criterion):
             return
 
         memset(&self.sum_missing[0], 0, self.n_outputs * sizeof(float64_t))
+        memset(&self.sum_w_missing[0], 0, self.n_outputs * sizeof(float64_t))
 
         self.weighted_n_missing = 0.0
 
@@ -1323,14 +1347,20 @@ cdef class RegressionCriterion(Criterion):
                 w = self.sample_weight[i]
 
             for k in range(self.n_outputs):
+                if self._has_y_missing and self._y_missing[i, k]:
+                    continue
+
                 y_ik = self.y[i, k]
                 w_y_ik = w * y_ik
                 self.sum_missing[k] += w_y_ik
+                self.sum_w_missing[k] += w
 
             self.weighted_n_missing += w
 
     cdef int reset(self) except -1 nogil:
         """Reset the criterion at pos=start."""
+        cdef intp_t k
+
         self.pos = self.start
         _move_sums_regression(
             self,
@@ -1340,10 +1370,23 @@ cdef class RegressionCriterion(Criterion):
             &self.weighted_n_right,
             self.missing_go_to_left
         )
+
+        if self.n_missing != 0 and self.missing_go_to_left:
+            for k in range(self.n_outputs):
+                self.sum_w_left[k] = self.sum_w_missing[k]
+                self.sum_w_right[k] = self.sum_w_total[k] - self.sum_w_missing[k]
+        else:
+            for k in range(self.n_outputs):
+                self.sum_w_left[k] = 0.0
+                self.sum_w_right[k] = self.sum_w_total[k]
+
         return 0
+
 
     cdef int reverse_reset(self) except -1 nogil:
         """Reset the criterion at pos=end."""
+        cdef intp_t k
+
         self.pos = self.end
         _move_sums_regression(
             self,
@@ -1353,8 +1396,16 @@ cdef class RegressionCriterion(Criterion):
             &self.weighted_n_left,
             not self.missing_go_to_left
         )
-        return 0
 
+        if self.n_missing != 0 and not self.missing_go_to_left:
+            for k in range(self.n_outputs):
+                self.sum_w_right[k] = self.sum_w_missing[k]
+                self.sum_w_left[k] = self.sum_w_total[k] - self.sum_w_missing[k]
+        else:
+            for k in range(self.n_outputs):
+                self.sum_w_right[k] = 0.0
+                self.sum_w_left[k] = self.sum_w_total[k]
+        return 0
     cdef int update(self, intp_t new_pos) except -1 nogil:
         """Updated statistics by moving sample_indices[pos:new_pos] to the left."""
         cdef intp_t pos = self.pos
@@ -1383,7 +1434,10 @@ cdef class RegressionCriterion(Criterion):
                     w = self.sample_weight[i]
 
                 for k in range(self.n_outputs):
+                    if self._has_y_missing and self._y_missing[i, k]:
+                        continue
                     self.sum_left[k] += w * self.y[i, k]
+                    self.sum_w_left[k] += w
 
                 self.weighted_n_left += w
         else:
@@ -1396,7 +1450,10 @@ cdef class RegressionCriterion(Criterion):
                     w = self.sample_weight[i]
 
                 for k in range(self.n_outputs):
+                    if self._has_y_missing and self._y_missing[i, k]:
+                        continue
                     self.sum_left[k] -= w * self.y[i, k]
+                    self.sum_w_left[k] -= w
 
                 self.weighted_n_left -= w
 
@@ -1404,6 +1461,9 @@ cdef class RegressionCriterion(Criterion):
                                  self.weighted_n_left)
         for k in range(self.n_outputs):
             self.sum_right[k] = self.sum_total[k] - self.sum_left[k]
+
+        for k in range(self.n_outputs):
+            self.sum_w_right[k] = self.sum_w_total[k] - self.sum_w_left[k]
 
         self.pos = new_pos
         return 0
@@ -1597,34 +1657,38 @@ cdef class SVarS(RegressionCriterion):
     """
 
     cdef float64_t node_impurity(self) noexcept nogil:
-        cdef float64_t W = self.weighted_n_node_samples
-        cdef float64_t invW
         cdef float64_t impurity = 0.0
+        cdef float64_t Wk, invWk, Sk
         cdef intp_t k
-        cdef float64_t Sk
-
-        if W <= 0.0:
-            return INFINITY
-
-        invW = 1.0 / W
+        cdef intp_t n_effective = 0
 
         for k in range(self.n_outputs):
-            Sk = self.sum_total[k]
-            impurity += (self.sq_sum_total_per_output[k] * invW) - (Sk * invW) * (Sk * invW)
+            Wk = self.sum_w_total[k]
+            if Wk <= 0.0:
+                continue
 
-        return impurity  # IMPORTANT: no division by n_outputs
+            invWk = 1.0 / Wk
+            Sk = self.sum_total[k]
+            impurity += (self.sq_sum_total_per_output[k] * invWk) - (Sk * invWk) * (Sk * invWk)
+            n_effective += 1
+
+        if n_effective == 0:
+            return INFINITY
+
+        return impurity
 
     cdef float64_t proxy_impurity_improvement(self) noexcept nogil:
-        """Proxy that preserves argmax split ordering."""
         cdef intp_t k
         cdef float64_t left_term = 0.0
         cdef float64_t right_term = 0.0
 
         for k in range(self.n_outputs):
-            left_term += self.sum_left[k] * self.sum_left[k]
-            right_term += self.sum_right[k] * self.sum_right[k]
+            if self.sum_w_left[k] > 0.0:
+                left_term += (self.sum_left[k] * self.sum_left[k]) / self.sum_w_left[k]
+            if self.sum_w_right[k] > 0.0:
+                right_term += (self.sum_right[k] * self.sum_right[k]) / self.sum_w_right[k]
 
-        return (left_term / self.weighted_n_left + right_term / self.weighted_n_right)
+        return left_term + right_term
 
     cdef void children_impurity(
         self, float64_t* impurity_left, float64_t* impurity_right
@@ -1637,33 +1701,12 @@ cdef class SVarS(RegressionCriterion):
         cdef intp_t k, p, i
         cdef float64_t w = 1.0
         cdef float64_t y_ik
-        cdef float64_t invWL, invWR
         cdef float64_t left_imp = 0.0
         cdef float64_t right_imp = 0.0
+        cdef float64_t WkL, WkR, invWL, invWR
+        cdef intp_t n_eff_left = 0
+        cdef intp_t n_eff_right = 0
 
-        cdef float64_t parent_imp = 0.0
-
-        # Handle degenerate children (should normally be avoided by splitter constraints)
-        if self.weighted_n_left <= 0.0 or self.weighted_n_right <= 0.0:
-            # fall back to parent impurity to keep things stable
-            parent_imp = self.node_impurity()
-
-            if self.weighted_n_left <= 0.0:
-                impurity_left[0] = parent_imp
-            # else: computed below
-
-            if self.weighted_n_right <= 0.0:
-                impurity_right[0] = parent_imp
-            # else: computed below
-
-            if self.weighted_n_left <= 0.0 and self.weighted_n_right <= 0.0:
-                return
-            # continue computing the non-degenerate side(s)
-
-        invWL = 1.0 / self.weighted_n_left
-        invWR = 1.0 / self.weighted_n_right
-
-        # Compute per-output squared sums for the left child
         memset(&self._sq_sum_left_buf[0], 0, self.n_outputs * sizeof(float64_t))
 
         for p in range(start, pos):
@@ -1671,10 +1714,11 @@ cdef class SVarS(RegressionCriterion):
             if sample_weight is not None:
                 w = sample_weight[i]
             for k in range(self.n_outputs):
+                if self._has_y_missing and self._y_missing[i, k]:
+                    continue
                 y_ik = self.y[i, k]
                 self._sq_sum_left_buf[k] += w * y_ik * y_ik
 
-        # Missing-to-left handling (matches sklearn regression criterion pattern)
         end_non_missing = self.end - self.n_missing
         if self.missing_go_to_left:
             for p in range(end_non_missing, self.end):
@@ -1682,19 +1726,26 @@ cdef class SVarS(RegressionCriterion):
                 if sample_weight is not None:
                     w = sample_weight[i]
                 for k in range(self.n_outputs):
+                    if self._has_y_missing and self._y_missing[i, k]:
+                        continue
                     y_ik = self.y[i, k]
                     self._sq_sum_left_buf[k] += w * y_ik * y_ik
 
-        # Now compute impurity from (Q/W - (S/W)^2) summed over outputs
-        if self.weighted_n_left > 0.0:
-            for k in range(self.n_outputs):
+        for k in range(self.n_outputs):
+            WkL = self.sum_w_left[k]
+            if WkL > 0.0:
+                invWL = 1.0 / WkL
                 left_imp += (self._sq_sum_left_buf[k] * invWL) - (self.sum_left[k] * invWL) * (self.sum_left[k] * invWL)
-            impurity_left[0] = left_imp
+                n_eff_left += 1
 
-        if self.weighted_n_right > 0.0:
-            for k in range(self.n_outputs):
+            WkR = self.sum_w_right[k]
+            if WkR > 0.0:
+                invWR = 1.0 / WkR
                 right_imp += ((self.sq_sum_total_per_output[k] - self._sq_sum_left_buf[k]) * invWR) - (self.sum_right[k] * invWR) * (self.sum_right[k] * invWR)
-            impurity_right[0] = right_imp
+                n_eff_right += 1
+
+        impurity_left[0] = left_imp if n_eff_left > 0 else INFINITY
+        impurity_right[0] = right_imp if n_eff_right > 0 else INFINITY
 # new number.X: svars weighted
 cdef class SVarSWeighted(RegressionCriterion):
     """Weighted sum of variances across outputs.
@@ -1731,26 +1782,28 @@ cdef class SVarSWeighted(RegressionCriterion):
 
 
     cdef float64_t node_impurity(self) noexcept nogil:
-        cdef float64_t W = self.weighted_n_node_samples
-        cdef float64_t invW = 1.0 / W
         cdef float64_t impurity = 0.0
+        cdef float64_t Wk, invWk, Sk, wk
         cdef intp_t k
-        cdef float64_t Sk
-
-        if not self.has_target_weights:
-            # fall back to unweighted SVarS (no division by n_outputs)
-            impurity = self.sq_sum_total * invW
-            for k in range(self.n_outputs):
-                Sk = self.sum_total[k]
-                impurity -= (Sk * invW) * (Sk * invW)
-            return impurity
+        cdef intp_t n_effective = 0
 
         for k in range(self.n_outputs):
+            Wk = self.sum_w_total[k]
+            if Wk <= 0.0:
+                continue
+
+            invWk = 1.0 / Wk
             Sk = self.sum_total[k]
-            impurity += self.target_weights[k] * (
-                    self.sq_sum_total_per_output[k] * invW
-                    - (Sk * invW) * (Sk * invW)
+            wk = self.target_weights[k] if self.has_target_weights else 1.0
+
+            impurity += wk * (
+                self.sq_sum_total_per_output[k] * invWk
+                - (Sk * invWk) * (Sk * invWk)
             )
+            n_effective += 1
+
+        if n_effective == 0:
+            return INFINITY
 
         return impurity
 
@@ -1758,18 +1811,17 @@ cdef class SVarSWeighted(RegressionCriterion):
         cdef intp_t k
         cdef float64_t left_term = 0.0
         cdef float64_t right_term = 0.0
-
-        if not self.has_target_weights:
-            for k in range(self.n_outputs):
-                left_term += self.sum_left[k] * self.sum_left[k]
-                right_term += self.sum_right[k] * self.sum_right[k]
-            return (left_term / self.weighted_n_left + right_term / self.weighted_n_right)
+        cdef float64_t wk
 
         for k in range(self.n_outputs):
-            left_term += self.target_weights[k] * (self.sum_left[k] * self.sum_left[k])
-            right_term += self.target_weights[k] * (self.sum_right[k] * self.sum_right[k])
+            wk = self.target_weights[k] if self.has_target_weights else 1.0
 
-        return (left_term / self.weighted_n_left + right_term / self.weighted_n_right)
+            if self.sum_w_left[k] > 0.0:
+                left_term += wk * (self.sum_left[k] * self.sum_left[k]) / self.sum_w_left[k]
+            if self.sum_w_right[k] > 0.0:
+                right_term += wk * (self.sum_right[k] * self.sum_right[k]) / self.sum_w_right[k]
+
+        return left_term + right_term
 
     cdef void children_impurity(self, float64_t* impurity_left, float64_t* impurity_right) noexcept nogil:
         cdef const float64_t[:] sample_weight = self.sample_weight
@@ -1777,24 +1829,14 @@ cdef class SVarSWeighted(RegressionCriterion):
         cdef intp_t pos = self.pos
         cdef intp_t start = self.start
         cdef intp_t k, p, i
+        cdef intp_t end_non_missing
         cdef float64_t w = 1.0
         cdef float64_t y_ik
-        cdef float64_t invWL
-        cdef float64_t invWR
         cdef float64_t left_imp = 0.0
         cdef float64_t right_imp = 0.0
-        cdef float64_t parent_imp
-        parent_imp = self.node_impurity()
-
-
-        # allocate temporary per-output squared sums on the stack is not possible;
-        # use a small heap buffer via numpy is not allowed nogil.
-        # Therefore we use a C array via malloc/free, or (simpler) reuse
-        # a preallocated buffer stored on self (recommended).
-
-        # Recommended: add in __cinit__:
-        #   self._sq_sum_left_buf = np.zeros(n_outputs, dtype=np.float64)
-        # and use it here. For now I show the self-buffer approach.
+        cdef float64_t WkL, WkR, invWL, invWR, wk
+        cdef intp_t n_eff_left = 0
+        cdef intp_t n_eff_right = 0
 
         memset(&self._sq_sum_left_buf[0], 0, self.n_outputs * sizeof(float64_t))
 
@@ -1803,10 +1845,11 @@ cdef class SVarSWeighted(RegressionCriterion):
             if sample_weight is not None:
                 w = sample_weight[i]
             for k in range(self.n_outputs):
+                if self._has_y_missing and self._y_missing[i, k]:
+                    continue
                 y_ik = self.y[i, k]
                 self._sq_sum_left_buf[k] += w * y_ik * y_ik
 
-        # missing to left
         end_non_missing = self.end - self.n_missing
         if self.missing_go_to_left:
             for p in range(end_non_missing, self.end):
@@ -1814,48 +1857,34 @@ cdef class SVarSWeighted(RegressionCriterion):
                 if sample_weight is not None:
                     w = sample_weight[i]
                 for k in range(self.n_outputs):
+                    if self._has_y_missing and self._y_missing[i, k]:
+                        continue
                     y_ik = self.y[i, k]
                     self._sq_sum_left_buf[k] += w * y_ik * y_ik
-        # new n.12 ssl
 
-        if self.weighted_n_left == 0.0 or self.weighted_n_right == 0.0:
-            if self.weighted_n_left == 0.0:
-                impurity_left[0] = parent_imp
-            if self.weighted_n_right == 0.0:
-                impurity_right[0] = parent_imp
+        for k in range(self.n_outputs):
+            wk = self.target_weights[k] if self.has_target_weights else 1.0
 
-        invWL = 1.0 / self.weighted_n_left
-        invWR = 1.0 / self.weighted_n_right
+            WkL = self.sum_w_left[k]
+            if WkL > 0.0:
+                invWL = 1.0 / WkL
+                left_imp += wk * (
+                    (self._sq_sum_left_buf[k] * invWL)
+                    - (self.sum_left[k] * invWL) * (self.sum_left[k] * invWL)
+                )
+                n_eff_left += 1
 
+            WkR = self.sum_w_right[k]
+            if WkR > 0.0:
+                invWR = 1.0 / WkR
+                right_imp += wk * (
+                    ((self.sq_sum_total_per_output[k] - self._sq_sum_left_buf[k]) * invWR)
+                    - (self.sum_right[k] * invWR) * (self.sum_right[k] * invWR)
+                )
+                n_eff_right += 1
 
-
-        if self.weighted_n_left != 0.0:
-            if not self.has_target_weights:
-                for k in range(self.n_outputs):
-                    left_imp += (self._sq_sum_left_buf[k] * invWL) - (self.sum_left[k] * invWL) ** 2.0
-            else:
-                for k in range(self.n_outputs):
-                    left_imp += self.target_weights[k] * (
-                        (self._sq_sum_left_buf[k] * invWL) - (self.sum_left[k] * invWL) ** 2.0
-                    )
-            impurity_left[0] = left_imp
-        # else: impurity_left[0] already set to parent_imp above
-
-        if self.weighted_n_right != 0.0:
-            if not self.has_target_weights:
-                for k in range(self.n_outputs):
-                    right_imp += ((self.sq_sum_total_per_output[k] - self._sq_sum_left_buf[k]) * invWR) - (self.sum_right[k] * invWR) ** 2.0
-            else:
-                for k in range(self.n_outputs):
-                    right_imp += self.target_weights[k] * (
-                        ((self.sq_sum_total_per_output[k] - self._sq_sum_left_buf[k]) * invWR)
-                        - (self.sum_right[k] * invWR) ** 2.0
-                    )
-            impurity_right[0] = right_imp
-        # else: impurity_right[0] already set to parent_imp above
-
-
-
+        impurity_left[0] = left_imp if n_eff_left > 0 else INFINITY
+        impurity_right[0] = right_imp if n_eff_right > 0 else INFINITY
 
 
 

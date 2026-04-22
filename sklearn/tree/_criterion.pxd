@@ -120,6 +120,14 @@ cdef class RegressionCriterion(Criterion):
     cdef float64_t[::1] sum_left     # Same as above, but for the left side of the split
     cdef float64_t[::1] sum_right    # Same as above, but for the right side of the split
     cdef float64_t[::1] sum_missing  # Same as above, but for missing values in X
+    cdef:
+        cnp.uint8_t[:, ::1] _y_missing
+        bint _has_y_missing
+        float64_t[::1] sum_w_total
+        float64_t[::1] sum_w_left
+        float64_t[::1] sum_w_right
+        float64_t[::1] sum_w_missing
+    cpdef set_y_missing_mask(self, object y_missing)
 
 
 

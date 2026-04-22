@@ -491,23 +491,22 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             if hasattr(criterion, "set_target_weights"):
                 criterion.set_target_weights(tw)
 
-        if is_classifier(self):
-            y_missing_mask_target = getattr(self, "_pct_missing_mask_", None)
-            y_missing_mask_clust = getattr(self, "_pct_missing_mask_clust_", None)
+        y_missing_mask_target = getattr(self, "_pct_missing_mask_", None)
+        y_missing_mask_clust = getattr(self, "_pct_missing_mask_clust_", None)
 
-            if hasattr(criterion, "set_y_missing_mask"):
-                if pct_y_clust is not None and y_missing_mask_clust is not None:
-                    criterion.set_y_missing_mask(
-                        np.asarray(y_missing_mask_clust, dtype=np.uint8)
-                    )
-                elif y_missing_mask_target is not None:
-                    criterion.set_y_missing_mask(
-                        np.asarray(y_missing_mask_target, dtype=np.uint8)
-                    )
-                else:
-                    criterion.set_y_missing_mask(
-                        np.asarray(np.isnan(y), dtype=np.uint8)
-                    )
+        if hasattr(criterion, "set_y_missing_mask"):
+            if pct_y_clust is not None and y_missing_mask_clust is not None:
+                criterion.set_y_missing_mask(
+                    np.asarray(y_missing_mask_clust, dtype=np.uint8)
+                )
+            elif y_missing_mask_target is not None:
+                criterion.set_y_missing_mask(
+                    np.asarray(y_missing_mask_target, dtype=np.uint8)
+                )
+            else:
+                criterion.set_y_missing_mask(
+                    np.asarray(np.isnan(y), dtype=np.uint8)
+                )
 
 
         SPLITTERS = SPARSE_SPLITTERS if issparse(X) else DENSE_SPLITTERS
@@ -3093,18 +3092,11 @@ class PCTRegressor(DecisionTreeRegressor):
             if np.any(miss):
                 y_target_train[miss, k] = default_model[k]
 
-        # Training clustering view: impute only overlapping y-derived clustering columns
-        y_clust_train = y_clust_raw.copy()
-        n_cx = roles_xy["clustering_x"].size
 
-        for j, y_col in enumerate(roles_xy["clustering_y"]):
-            clust_pos = n_cx + j
-            tgt_matches = np.where(roles_xy["target_y"] == y_col)[0]
-            if tgt_matches.size:
-                tgt_k = int(tgt_matches[0])
-                miss = missing_mask_target[:, tgt_k]
-                if np.any(miss):
-                    y_clust_train[miss, clust_pos] = default_model[tgt_k]
+
+        # Training clustering view: keep raw values and let the criterion
+        # handle target-side missingness natively through _pct_missing_mask_clust_
+        y_clust_train = y_clust_raw.copy()
         use_ssl_pct = bool(self.ssl) and self.ssl_method == "clus_pct"
 
         if use_ssl_pct:
@@ -3126,11 +3118,14 @@ class PCTRegressor(DecisionTreeRegressor):
 
         if use_ssl_pct and np.isclose(self.ssl_weight_, 1.0):
             fit_rows = np.flatnonzero(~np.any(missing_mask_target, axis=1))
-
+        self._pct_fit_rows_ = fit_rows.copy()
         X_fit = X[fit_rows]
         sample_weight_fit = None if sample_weight is None else sample_weight[fit_rows]
         y_target_train_fit = y_target_train[fit_rows]
         y_clust_train_fit = y_clust_train[fit_rows]
+
+        missing_mask_target_fit = missing_mask_target[fit_rows]
+        missing_mask_clust_fit = missing_mask_clust[fit_rows]
         # Fit:
         # - split criterion sees y_clust_train
         # - leaf value sees y_target_train
@@ -3142,6 +3137,8 @@ class PCTRegressor(DecisionTreeRegressor):
 
         old_criterion = self.criterion
         old_target_weights = self.target_weights
+        old_pct_missing_mask = getattr(self, "_pct_missing_mask_", None)
+        old_pct_missing_mask_clust = getattr(self, "_pct_missing_mask_clust_", None)
 
         if use_ssl_pct:
             self.criterion = "svars_weighted"
@@ -3174,6 +3171,8 @@ class PCTRegressor(DecisionTreeRegressor):
         finally:
             self.criterion = old_criterion
             self.target_weights = old_target_weights
+            self._pct_missing_mask_ = missing_mask_target_fit
+            self._pct_missing_mask_clust_ = missing_mask_clust_fit
 
         # Per-node "has observed target?" metadata built from ORIGINAL target missingness
         path = self.decision_path(X, check_input=check_input)

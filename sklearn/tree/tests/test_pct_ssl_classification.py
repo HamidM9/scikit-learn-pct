@@ -190,3 +190,96 @@ def test_pct_ssl_classification_supervised_requires_target_y_equals_clustering_y
             target_features=[2],
             RemoveMissingTarget="No",
         ).fit(X, y)
+
+
+def test_pct_ssl_classification_weight_changes_tree_when_clustering_x_present():
+    rng = np.random.RandomState(8)
+
+    # Build a dataset where descriptive-space clustering can matter.
+    X = np.r_[
+        rng.normal(loc=[-2.0, 0.0], scale=0.3, size=(20, 2)),
+        rng.normal(loc=[+2.0, 0.0], scale=0.3, size=(20, 2)),
+    ]
+
+    # Sparse labeled data: only a few labels observed
+    y = np.zeros((40, 1), dtype=float)
+    y[:20, 0] = 0.0
+    y[20:, 0] = 1.0
+
+    # Make most labels missing
+    y[2:18, 0] = np.nan
+    y[22:38, 0] = np.nan
+
+    est0 = PCTClassifier(
+        criterion="clus_gini",
+        random_state=0,
+        ssl=True,
+        ssl_method="clus_pct",
+        ssl_weight=0.0,
+        descriptive_features=[0, 1],
+        clustering_features=[0, 1, 2],
+        target_features=[2],
+        RemoveMissingTarget="No",
+    ).fit(X, y)
+
+    est1 = PCTClassifier(
+        criterion="clus_gini",
+        random_state=0,
+        ssl=True,
+        ssl_method="clus_pct",
+        ssl_weight=1.0,
+        descriptive_features=[0, 1],
+        clustering_features=[0, 1, 2],
+        target_features=[2],
+        RemoveMissingTarget="No",
+    ).fit(X, y)
+
+    # We do not require the whole tree to differ in every run,
+    # but at least the SSL column weights must differ.
+    np.testing.assert_allclose(est0._pct_ssl_column_weights_, [1.5, 1.5, 0.0])
+    np.testing.assert_allclose(est1._pct_ssl_column_weights_, [0.0, 0.0, 3.0])
+
+    # Stronger signal: root impurity or root split feature should typically differ.
+    assert (
+        est0.tree_.feature[0] != est1.tree_.feature[0]
+        or not np.isclose(est0.tree_.threshold[0], est1.tree_.threshold[0])
+    )
+
+
+def test_pct_ssl_classification_criterion_uses_target_weights_nontrivially():
+    rng = np.random.RandomState(9)
+
+    X = rng.normal(size=(50, 2))
+    y = (X[:, 0] > 0).astype(float).reshape(-1, 1)
+
+    # Hide many labels so SSL has room to matter
+    y[::2, 0] = np.nan
+
+    est_low = PCTClassifier(
+        criterion="clus_entropy",
+        random_state=0,
+        ssl=True,
+        ssl_method="clus_pct",
+        ssl_weight=0.1,
+        descriptive_features=[0, 1],
+        clustering_features=[0, 1, 2],
+        target_features=[2],
+        RemoveMissingTarget="No",
+    ).fit(X, y)
+
+    est_high = PCTClassifier(
+        criterion="clus_entropy",
+        random_state=0,
+        ssl=True,
+        ssl_method="clus_pct",
+        ssl_weight=0.9,
+        descriptive_features=[0, 1],
+        clustering_features=[0, 1, 2],
+        target_features=[2],
+        RemoveMissingTarget="No",
+    ).fit(X, y)
+
+    assert not np.allclose(
+        est_low._pct_ssl_column_weights_,
+        est_high._pct_ssl_column_weights_,
+    )
