@@ -1543,33 +1543,6 @@ class PCTClassifier(DecisionTreeClassifier):
 
         return roles_xy
 
-    def _encode_ssl_descriptive_x_for_classification(self, X_part):
-        """Encode descriptive X columns as nominal clustering outputs.
-
-        Classification criteria expect nominal/integer outputs.
-        Raw continuous X values must not be cast directly to int, because
-        values like 0.1, 0.2, 0.9 would all become 0.
-
-        We therefore ordinal-encode each descriptive X column by its sorted
-        unique values. This allows unlabeled X structure to affect CLUS-style
-        SSL split scoring.
-        """
-        X_part = np.asarray(X_part, dtype=np.float64)
-
-        if X_part.ndim == 1:
-            X_part = X_part.reshape(-1, 1)
-
-        X_enc = np.zeros(X_part.shape, dtype=np.float64)
-
-        for j in range(X_part.shape[1]):
-            col = X_part[:, j]
-            values, encoded = np.unique(col, return_inverse=True)
-            X_enc[:, j] = encoded.astype(np.float64)
-
-        return X_enc
-
-
-    #pct
     def _build_pct_classification_views(self, X, y_arr, roles_xy):
         import numpy as np
 
@@ -1597,6 +1570,37 @@ class PCTClassifier(DecisionTreeClassifier):
             y_target = y_target.reshape(-1, 1)
 
         return y_clust, y_target
+
+
+
+    def _encode_ssl_descriptive_x_for_classification(self, X_part):
+        """Encode descriptive X columns as nominal clustering outputs.
+
+        Classification criteria expect nominal/integer outputs.
+        Raw continuous X values must not be cast directly to int, because
+        values like 0.1, 0.2, 0.9 would all become 0.
+
+        We therefore ordinal-encode each descriptive X column by its sorted
+        unique values. This allows unlabeled X structure to affect CLUS-style
+        SSL split scoring.
+        """
+        X_part = np.asarray(X_part, dtype=np.float64)
+
+        if X_part.ndim == 1:
+            X_part = X_part.reshape(-1, 1)
+
+        X_enc = np.zeros(X_part.shape, dtype=np.float64)
+
+        for j in range(X_part.shape[1]):
+            col = X_part[:, j]
+            values, encoded = np.unique(col, return_inverse=True)
+            X_enc[:, j] = encoded.astype(np.float64)
+
+        return X_enc
+
+
+    #pct
+
     def _resolve_ssl_weight_grid(self):
         if not self.ssl or self.ssl_method == "none":
             return None
@@ -3030,6 +3034,19 @@ class PCTRegressor(DecisionTreeRegressor):
             self._pct_feature_roles
         )
         roles_xy = self._pct_feature_roles_xy
+
+        # ------------------------------------------------------------------
+        # CLUS-style SSL-PCT classification default:
+        # clustering space = descriptive X + target Y.
+        #
+        # Without this, ssl_weight < 1 has no real effect unless the user
+        # explicitly passes clustering_features that include X columns.
+        # ------------------------------------------------------------------
+        if self.ssl and self.ssl_method == "clus_pct":
+            if roles_xy["clustering_x"].size == 0:
+                roles_xy["clustering_x"] = roles_xy["descriptive_x"].copy()
+
+            self._pct_feature_roles_xy = roles_xy
 
         # v1 restriction: splitting only on X
         if roles_xy["descriptive_y"].size != 0:
