@@ -1543,13 +1543,41 @@ class PCTClassifier(DecisionTreeClassifier):
 
         return roles_xy
 
+    def _encode_ssl_descriptive_x_for_classification(self, X_part):
+        """Encode descriptive X columns as nominal clustering outputs.
+
+        Classification criteria expect nominal/integer outputs.
+        Raw continuous X values must not be cast directly to int, because
+        values like 0.1, 0.2, 0.9 would all become 0.
+
+        We therefore ordinal-encode each descriptive X column by its sorted
+        unique values. This allows unlabeled X structure to affect CLUS-style
+        SSL split scoring.
+        """
+        X_part = np.asarray(X_part, dtype=np.float64)
+
+        if X_part.ndim == 1:
+            X_part = X_part.reshape(-1, 1)
+
+        X_enc = np.zeros(X_part.shape, dtype=np.float64)
+
+        for j in range(X_part.shape[1]):
+            col = X_part[:, j]
+            values, encoded = np.unique(col, return_inverse=True)
+            X_enc[:, j] = encoded.astype(np.float64)
+
+        return X_enc
+
+
     #pct
     def _build_pct_classification_views(self, X, y_arr, roles_xy):
         import numpy as np
 
         clust_parts = []
         if roles_xy["clustering_x"].size:
-            clust_parts.append(np.asarray(X[:, roles_xy["clustering_x"]], dtype=np.float64))
+            X_clust = np.asarray(X[:, roles_xy["clustering_x"]], dtype=np.float64)
+            X_clust = self._encode_ssl_descriptive_x_for_classification(X_clust)
+            clust_parts.append(X_clust)
         if roles_xy["clustering_y"].size:
             clust_parts.append(np.asarray(y_arr[:, roles_xy["clustering_y"]], dtype=np.float64))
 
@@ -1709,6 +1737,19 @@ class PCTClassifier(DecisionTreeClassifier):
             self._pct_feature_roles
         )
         roles_xy = self._pct_feature_roles_xy
+        # ------------------------------------------------------------------
+        # CLUS-style SSL-PCT classification default:
+        # clustering space = descriptive X + target Y
+        #
+        # Supervised classification keeps clustering = target_y only.
+        # SSL classification must add descriptive_x, otherwise unlabeled
+        # rows cannot affect split scoring.
+        # ------------------------------------------------------------------
+        if self.ssl and self.ssl_method == "clus_pct":
+            if roles_xy["clustering_x"].size == 0:
+                roles_xy["clustering_x"] = roles_xy["descriptive_x"].copy()
+
+            self._pct_feature_roles_xy = roles_xy
 
         # ------------------------------------------------------------------
         # Classification v1 restrictions
