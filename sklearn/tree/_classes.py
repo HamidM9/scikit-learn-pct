@@ -248,6 +248,8 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         check_input=True,
         missing_values_in_feature_mask=None,
         pct_y_clust=None, #pct
+        pct_ssl_raw_x_clust=None,
+        pct_ssl_n_descriptive=0,
 
     ):
         random_state = check_random_state(self.random_state)
@@ -490,7 +492,22 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
             if hasattr(criterion, "set_target_weights"):
                 criterion.set_target_weights(tw)
-
+        # ------------------------------------------------------------------
+        # SSL-PCT classification: pass raw descriptive X columns to criterion.
+        # The clustering matrix still contains encoded X columns so the
+        # classification criterion can initialize safely, but the CLUS-style
+        # SSL criterion uses these raw columns for numeric SVarS.
+        # ------------------------------------------------------------------
+        if (
+                is_classification
+                and pct_ssl_raw_x_clust is not None
+                and pct_ssl_n_descriptive > 0
+                and hasattr(criterion, "set_ssl_numeric_descriptive")
+        ):
+            criterion.set_ssl_numeric_descriptive(
+                np.asarray(pct_ssl_raw_x_clust, dtype=np.float64, order="C"),
+                int(pct_ssl_n_descriptive),
+            )
         y_missing_mask_target = getattr(self, "_pct_missing_mask_", None)
         y_missing_mask_clust = getattr(self, "_pct_missing_mask_clust_", None)
 
@@ -1812,11 +1829,28 @@ class PCTClassifier(DecisionTreeClassifier):
             y_target_raw = y_target_raw[keep]
             missing_mask_target = missing_mask_target[keep]
 
+
         elif self.RemoveMissingTarget == "No":
-            if has_missing_target_rows and not self.ssl:
+
+            if (
+
+                    has_missing_target_rows
+
+                    and not self.ssl
+
+                    and self.missing_target_attr_handling == "error"
+
+            ):
                 raise ValueError(
-                    "Missing classification targets found. "
-                    "Use RemoveMissingTarget='Yes' or ssl=True."
+
+                    "Missing targets found with ssl=False. "
+
+                    "Use RemoveMissingTarget='Yes', ssl=True, or set "
+
+                    "missing_target_attr_handling to one of "
+
+                    "{'zero', 'default_model', 'parent_node'}."
+
                 )
         else:
             raise ValueError(
@@ -1966,12 +2000,26 @@ class PCTClassifier(DecisionTreeClassifier):
                 else y_target_train_fit.ravel()
             )
 
+            ssl_raw_x_clust_fit = None
+            ssl_n_descriptive = 0
+
+            if use_ssl_pct and roles_xy["clustering_x"].size:
+                ssl_raw_x_clust = np.asarray(
+                    X[:, roles_xy["clustering_x"]],
+                    dtype=np.float64,
+                    order="C",
+                )
+                ssl_raw_x_clust_fit = ssl_raw_x_clust[fit_rows]
+                ssl_n_descriptive = roles_xy["clustering_x"].size
+
             self._fit(
                 X_fit,
                 fit_y_value,
                 sample_weight=sample_weight_fit,
                 check_input=check_input,
                 pct_y_clust=y_clust_train_fit,
+                pct_ssl_raw_x_clust=ssl_raw_x_clust_fit,
+                pct_ssl_n_descriptive=ssl_n_descriptive,
             )
         finally:
             self.target_weights = old_target_weights

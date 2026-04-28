@@ -812,11 +812,15 @@ cdef class ClusEntropy(ClassificationCriterion):
 
     cdef float64_t* _tw
     cdef bint _has_tw
-
+    cdef const float64_t[:, ::1] _ssl_x_raw
+    cdef intp_t _ssl_n_desc
+    cdef bint _has_ssl_x_raw
 
     def __cinit__(self):
         self._tw = NULL
         self._has_tw = False
+        self._ssl_n_desc = 0
+        self._has_ssl_x_raw = False
 
     def __dealloc__(self):
         if self._tw != NULL:
@@ -846,10 +850,77 @@ cdef class ClusEntropy(ClassificationCriterion):
         if self._has_tw:
             return self._tw[o]
         return 1.0
+    cpdef set_ssl_numeric_descriptive(self, object x_raw, int n_desc):
+        """Set raw descriptive X columns for SSL-PCT classification.
+
+        First n_desc clustering outputs are numeric descriptive attributes.
+        Remaining outputs are nominal target attributes.
+        """
+        cdef cnp.ndarray arr = np.asarray(x_raw, dtype=np.float64, order="C")
+
+        if arr.ndim != 2:
+            raise ValueError("x_raw must be 2D")
+
+        if n_desc < 0 or n_desc > self.n_outputs:
+            raise ValueError("invalid number of SSL descriptive outputs")
+
+        if arr.shape[1] != n_desc:
+            raise ValueError("x_raw.shape[1] must equal n_desc")
+
+        self._ssl_x_raw = arr
+        self._ssl_n_desc = <intp_t> n_desc
+        self._has_ssl_x_raw = n_desc > 0
+
+    cdef float64_t _ssl_svars_range(
+            self,
+            intp_t start,
+            intp_t end
+    ) noexcept nogil:
+        cdef:
+            intp_t p, i, k
+            float64_t w
+            float64_t val
+            float64_t sum_w
+            float64_t sum_v
+            float64_t sum_v2
+            float64_t svars
+            float64_t total = 0.0
+            float64_t col_w
+
+        if not self._has_ssl_x_raw:
+            return 0.0
+
+        for k in range(self._ssl_n_desc):
+            col_w = self._w(k)
+            if col_w <= 0.0:
+                continue
+
+            sum_w = 0.0
+            sum_v = 0.0
+            sum_v2 = 0.0
+
+            for p in range(start, end):
+                i = self.sample_indices[p]
+                w = 1.0
+                if self.sample_weight is not None:
+                    w = self.sample_weight[i]
+
+                val = self._ssl_x_raw[i, k]
+
+                if val == val:
+                    sum_w += w
+                    sum_v += w * val
+                    sum_v2 += w * val * val
+
+            if sum_w > 0.0:
+                svars = sum_v2 - (sum_v * sum_v) / sum_w
+                total += col_w * svars
+
+        return total
 
     cdef float64_t node_impurity(self) noexcept nogil:
         cdef:
-            float64_t impur = 0.0
+            float64_t impur = self._ssl_svars_range(self.start, self.end)
             float64_t total_o, count_k, p, w
             intp_t o, c, idx
             bint use_subset = False
@@ -863,6 +934,10 @@ cdef class ClusEntropy(ClassificationCriterion):
         if use_subset:
             for idx in range(clustering_outputs_view.shape[0]):
                 o = clustering_outputs_view[idx]
+
+                if o < self._ssl_n_desc:
+                    continue
+
                 w = self._w(o)
                 if w <= 0.0:
                     continue
@@ -880,7 +955,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                         p = count_k / total_o
                         impur -= w * p * (log(p) / log(2.0))
         else:
-            for o in range(self.n_outputs):
+            for o in range(self._ssl_n_desc, self.n_outputs):
                 w = self._w(o)
                 if w <= 0.0:
                     continue
@@ -906,8 +981,8 @@ cdef class ClusEntropy(ClassificationCriterion):
         float64_t* impurity_right
     ) noexcept nogil:
         cdef:
-            float64_t left = 0.0
-            float64_t right = 0.0
+            float64_t left = self._ssl_svars_range(self.start, self.pos)
+            float64_t right = self._ssl_svars_range(self.pos, self.end)
             float64_t total_o, count_k, p, w
             intp_t o, c, idx
             bint use_subset = False
@@ -921,6 +996,10 @@ cdef class ClusEntropy(ClassificationCriterion):
         if use_subset:
             for idx in range(clustering_outputs_view.shape[0]):
                 o = clustering_outputs_view[idx]
+
+                if o < self._ssl_n_desc:
+                    continue
+
                 w = self._w(o)
                 if w <= 0.0:
                     continue
@@ -945,7 +1024,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                             p = count_k / total_o
                             right -= w * p * (log(p) / log(2.0))
         else:
-            for o in range(self.n_outputs):
+            for o in range(self._ssl_n_desc, self.n_outputs):
                 w = self._w(o)
                 if w <= 0.0:
                     continue
@@ -981,12 +1060,18 @@ cdef class ClusGini(ClassificationCriterion):
     - optional per-output target weights
     """
 
-    cdef float64_t* _tw
+    cdef float64_t * _tw
     cdef bint _has_tw
+
+    cdef const float64_t[:, ::1] _ssl_x_raw
+    cdef intp_t _ssl_n_desc
+    cdef bint _has_ssl_x_raw
 
     def __cinit__(self):
         self._tw = NULL
         self._has_tw = False
+        self._ssl_n_desc = 0
+        self._has_ssl_x_raw = False
 
     def __dealloc__(self):
         if self._tw != NULL:
@@ -1016,10 +1101,77 @@ cdef class ClusGini(ClassificationCriterion):
         if self._has_tw:
             return self._tw[o]
         return 1.0
+    cpdef set_ssl_numeric_descriptive(self, object x_raw, int n_desc):
+        """Set raw descriptive X columns for SSL-PCT classification.
+
+        The first n_desc clustering outputs are treated as numeric descriptive
+        attributes and are scored by SVarS, not by Gini.
+        """
+        cdef cnp.ndarray arr = np.asarray(x_raw, dtype=np.float64, order="C")
+
+        if arr.ndim != 2:
+            raise ValueError("x_raw must be 2D")
+
+        if n_desc < 0 or n_desc > self.n_outputs:
+            raise ValueError("invalid number of SSL descriptive outputs")
+
+        if arr.shape[1] != n_desc:
+            raise ValueError("x_raw.shape[1] must equal n_desc")
+
+        self._ssl_x_raw = arr
+        self._ssl_n_desc = <intp_t> n_desc
+        self._has_ssl_x_raw = n_desc > 0
+
+    cdef float64_t _ssl_svars_range(
+            self,
+            intp_t start,
+            intp_t end
+    ) noexcept nogil:
+        cdef:
+            intp_t p, i, k
+            float64_t w
+            float64_t val
+            float64_t sum_w
+            float64_t sum_v
+            float64_t sum_v2
+            float64_t svars
+            float64_t total = 0.0
+            float64_t col_w
+
+        if not self._has_ssl_x_raw:
+            return 0.0
+
+        for k in range(self._ssl_n_desc):
+            col_w = self._w(k)
+            if col_w <= 0.0:
+                continue
+
+            sum_w = 0.0
+            sum_v = 0.0
+            sum_v2 = 0.0
+
+            for p in range(start, end):
+                i = self.sample_indices[p]
+                w = 1.0
+                if self.sample_weight is not None:
+                    w = self.sample_weight[i]
+
+                val = self._ssl_x_raw[i, k]
+
+                if val == val:
+                    sum_w += w
+                    sum_v += w * val
+                    sum_v2 += w * val * val
+
+            if sum_w > 0.0:
+                svars = sum_v2 - (sum_v * sum_v) / sum_w
+                total += col_w * svars
+
+        return total
 
     cdef float64_t node_impurity(self) noexcept nogil:
         cdef:
-            float64_t impur = 0.0
+            float64_t impur = self._ssl_svars_range(self.start, self.end)
             float64_t total_o, count_k, p, s, w
             intp_t o, c, idx
             bint use_subset = False
@@ -1033,6 +1185,10 @@ cdef class ClusGini(ClassificationCriterion):
         if use_subset:
             for idx in range(clustering_outputs_view.shape[0]):
                 o = clustering_outputs_view[idx]
+
+                if o < self._ssl_n_desc:
+                    continue
+
                 w = self._w(o)
                 if w <= 0.0:
                     continue
@@ -1053,7 +1209,7 @@ cdef class ClusGini(ClassificationCriterion):
 
                 impur += w * (1.0 - s)
         else:
-            for o in range(self.n_outputs):
+            for o in range(self._ssl_n_desc, self.n_outputs):
                 w = self._w(o)
                 if w <= 0.0:
                     continue
@@ -1082,8 +1238,8 @@ cdef class ClusGini(ClassificationCriterion):
         float64_t* impurity_right
     ) noexcept nogil:
         cdef:
-            float64_t left = 0.0
-            float64_t right = 0.0
+            float64_t left = self._ssl_svars_range(self.start, self.pos)
+            float64_t right = self._ssl_svars_range(self.pos, self.end)
             float64_t total_o, count_k, p, s, w
             intp_t o, c, idx
             bint use_subset = False
@@ -1097,6 +1253,10 @@ cdef class ClusGini(ClassificationCriterion):
         if use_subset:
             for idx in range(clustering_outputs_view.shape[0]):
                 o = clustering_outputs_view[idx]
+
+                if o < self._ssl_n_desc:
+                    continue
+
                 w = self._w(o)
                 if w <= 0.0:
                     continue
@@ -1125,7 +1285,7 @@ cdef class ClusGini(ClassificationCriterion):
                             s += p * p
                     right += w * (1.0 - s)
         else:
-            for o in range(self.n_outputs):
+            for o in range(self._ssl_n_desc, self.n_outputs):
                 w = self._w(o)
                 if w <= 0.0:
                     continue

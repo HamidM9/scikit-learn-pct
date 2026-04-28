@@ -140,3 +140,117 @@ def test_pct_ssl_classification_invalid_weight_raises():
 
     with pytest.raises(ValueError, match="ssl_weight"):
         est.fit(X, y)
+
+
+
+def test_pct_ssl_classification_gini_uses_numeric_x_not_encoded_nominal():
+    X = np.array(
+        [
+            [0.00],
+            [0.10],
+            [0.20],
+            [0.80],
+            [0.90],
+            [1.00],
+        ],
+        dtype=np.float64,
+    )
+
+    y = np.array(
+        [
+            [0.0],
+            [np.nan],
+            [np.nan],
+            [np.nan],
+            [np.nan],
+            [1.0],
+        ],
+        dtype=np.float64,
+    )
+
+    est = PCTClassifier(
+        criterion="clus_gini",
+        random_state=0,
+        ssl=True,
+        ssl_method="clus_pct",
+        ssl_weight=0.0,
+        RemoveMissingTarget="No",
+        compat_mode="clus_v1",
+        tie_break="clus",
+        split_position="clus_exact",
+        max_depth=1,
+    )
+
+    est.fit(X, y)
+
+    assert est.tree_.feature[0] == 0
+    assert 0.2 < est.tree_.threshold[0] < 0.8
+
+
+def test_pct_ssl_classification_entropy_uses_numeric_x_not_encoded_nominal():
+    X = np.array(
+        [
+            [0.00],
+            [0.10],
+            [0.20],
+            [0.80],
+            [0.90],
+            [1.00],
+        ],
+        dtype=np.float64,
+    )
+
+    y = np.array(
+        [
+            [0.0],
+            [np.nan],
+            [np.nan],
+            [np.nan],
+            [np.nan],
+            [1.0],
+        ],
+        dtype=np.float64,
+    )
+
+    est = PCTClassifier(
+        criterion="clus_entropy",
+        random_state=0,
+        ssl=True,
+        ssl_method="clus_pct",
+        ssl_weight=0.0,
+        RemoveMissingTarget="No",
+        compat_mode="clus_v1",
+        tie_break="clus",
+        split_position="clus_exact",
+        max_depth=1,
+    )
+
+    est.fit(X, y)
+
+    assert est.tree_.feature[0] == 0
+    assert 0.2 < est.tree_.threshold[0] < 0.8
+
+def test_pct_ssl_classification_weight_zero_ignores_target_signal():
+    X = np.array(
+        [[0.0], [0.1], [0.2], [0.8], [0.9], [1.0]],
+        dtype=np.float64,
+    )
+    y = np.array([[0.0], [1.0], [0.0], [1.0], [0.0], [1.0]], dtype=np.float64)
+
+    est = PCTClassifier(
+        criterion="clus_gini",
+        random_state=0,
+        ssl=True,
+        ssl_method="clus_pct",
+        ssl_weight=0.0,
+        RemoveMissingTarget="No",
+        compat_mode="clus_v1",
+        tie_break="clus",
+        split_position="clus_exact",
+        max_depth=1,
+    )
+
+    est.fit(X, y)
+
+    assert est.tree_.feature[0] == 0
+    assert 0.2 < est.tree_.threshold[0] < 0.8
