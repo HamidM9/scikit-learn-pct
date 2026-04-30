@@ -1747,6 +1747,64 @@ class PCTClassifier(DecisionTreeClassifier):
                 best_w = float(w)
 
         return best_w
+
+    def _pct_majority_class_from_observed(self, col):
+        """CLUS-style majority class from observed labels only.
+
+        Tie-breaking follows CLUS nominal order for binary {1,0}: prefer 1.
+        """
+        col = np.asarray(col)
+        col = col[~np.isnan(col)]
+
+        if col.size == 0:
+            return None
+
+        vals, counts = np.unique(col.astype(np.intp), return_counts=True)
+        max_count = counts.max()
+        candidates = vals[counts == max_count]
+
+        # CLUS ARFF order in our examples is {1,0}, so tie prefers 1
+        if 1 in candidates:
+            return 1
+
+        return int(candidates[0])
+
+    def _compute_pct_clus_leaf_predictions(self, X, y_target_raw):
+        """Store CLUS-style leaf predictions for PCT classification.
+
+        For each leaf and each target:
+            prediction = majority class among non-missing target values in that leaf
+
+        If no observed value exists in the leaf, fallback according to
+        missing_target_attr_handling.
+        """
+        leaf_ids = self.apply(X)
+        unique_leaves = np.unique(leaf_ids)
+
+        leaf_predictions = {}
+
+        for leaf in unique_leaves:
+            rows = leaf_ids == leaf
+            preds = np.zeros(y_target_raw.shape[1], dtype=np.intp)
+
+            for k in range(y_target_raw.shape[1]):
+                maj = self._pct_majority_class_from_observed(y_target_raw[rows, k])
+
+                if maj is not None:
+                    preds[k] = maj
+                    continue
+
+                # fallback when the leaf has no observed labels for this target
+                if self.missing_target_attr_handling == "zero":
+                    preds[k] = 0
+                elif self.missing_target_attr_handling in ("default_model", "parent_node", "error"):
+                    preds[k] = int(self._pct_default_model_[k])
+                else:
+                    preds[k] = int(self._pct_default_model_[k])
+
+            leaf_predictions[int(leaf)] = preds
+
+        self._pct_clus_leaf_predictions_ = leaf_predictions
     def fit(self, X, y, sample_weight=None, check_input=True):
         y_arr = np.asarray(y, dtype=np.float64)
         if y_arr.ndim == 1:
@@ -2052,7 +2110,10 @@ class PCTClassifier(DecisionTreeClassifier):
             if cr != -1:
                 parent[cr] = p
         self._pct_parent_ = parent
-
+        # CLUS-style leaf prototypes for prediction.
+        # This is especially important for SSL / missing-target cases, where
+        # sklearn's tree_.value decoding may not equal CLUS leaf majority prototypes.
+        self._compute_pct_clus_leaf_predictions(X, y_target_raw)
         return self
 
     def _fit_pct(self, X, y, sample_weight=None, check_input=True):
@@ -2150,15 +2211,33 @@ class PCTClassifier(DecisionTreeClassifier):
         return self._apply_missing_policy_to_proba(X, proba, check_input=check_input)
 
     def predict(self, X, check_input=True):
+        # CLUS-style PCT classifier prediction:
+        # use stored leaf prototypes instead of raw sklearn probability decoding.
+        if hasattr(self, "_pct_clus_leaf_predictions_"):
+            X = self._validate_X_predict(X, check_input)
+            leaf_ids = self.apply(X, check_input=False)
+
+            preds = np.vstack(
+                [self._pct_clus_leaf_predictions_[int(leaf)] for leaf in leaf_ids]
+            )
+
+            if preds.shape[1] == 1:
+                return preds.ravel()
+
+            return preds
+
+        # Fallback to old behavior
         proba = self.predict_proba(X, check_input=check_input)
+
         if self.n_outputs_ == 1:
             return self.classes_.take(proba.argmax(axis=1), axis=0)
-        # multi-output
-        import numpy as np
+
         n_samples = X.shape[0]
         preds = np.zeros((n_samples, self.n_outputs_), dtype=self.classes_[0].dtype)
+
         for k in range(self.n_outputs_):
             preds[:, k] = self.classes_[k].take(proba[k].argmax(axis=1), axis=0)
+
         return preds
 
 
