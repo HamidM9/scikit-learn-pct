@@ -326,7 +326,9 @@ cdef class ClassificationCriterion(Criterion):
         self.clustering_outputs = None #pct
         self.n_classes = np.empty(n_outputs, dtype=np.intp)
         self._has_y_missing = False
+        self._estimate_missing_from_parent = False
 
+        self._missing_prior_initialized = False
         cdef intp_t k = 0
         cdef intp_t max_n_classes = 0
 
@@ -344,6 +346,7 @@ cdef class ClassificationCriterion(Criterion):
         self.sum_total = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
         self.sum_left = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
         self.sum_right = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
+        self._missing_prior = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
 
     def __reduce__(self):
         return (type(self),
@@ -402,22 +405,70 @@ cdef class ClassificationCriterion(Criterion):
         for k in range(self.n_outputs):
             memset(&self.sum_total[k, 0], 0, self.n_classes[k] * sizeof(float64_t))
 
+        # ------------------------------------------------------------
+        # First pass: count only observed labels.
+        # ------------------------------------------------------------
         for p in range(start, end):
             i = sample_indices[p]
 
-            # w is originally set to be 1.0, meaning that if no sample weights
-            # are given, the default weight of each sample is 1.0.
+            w = 1.0
             if sample_weight is not None:
                 w = sample_weight[i]
 
-            # Count weighted class frequency for each target
             for k in range(self.n_outputs):
                 if self._has_y_missing and self._y_missing[i, k]:
                     continue
+
                 c = <intp_t> self.y[i, k]
                 self.sum_total[k, c] += w
 
             self.weighted_n_node_samples += w
+
+        # ------------------------------------------------------------
+        # Build parent/node prior for missing clustering labels.
+        # For each output k:
+        #   prior[k,c] = observed_count[k,c] / observed_total[k]
+        # If no observed labels exist for output k, use uniform prior.
+        # ------------------------------------------------------------
+        cdef float64_t total_k
+        cdef float64_t inv_total_k
+
+        if not self._missing_prior_initialized:
+            for k in range(self.n_outputs):
+                total_k = 0.0
+
+                for c in range(self.n_classes[k]):
+                    total_k += self.sum_total[k, c]
+
+                if total_k > 0.0:
+                    inv_total_k = 1.0 / total_k
+                    for c in range(self.n_classes[k]):
+                        self._missing_prior[k, c] = self.sum_total[k, c] * inv_total_k
+                else:
+                    inv_total_k = 1.0 / self.n_classes[k]
+                    for c in range(self.n_classes[k]):
+                        self._missing_prior[k, c] = inv_total_k
+            self._missing_prior_initialized = True
+
+        # ------------------------------------------------------------
+        # Second pass: if enabled, estimate missing labels from prior.
+        # ------------------------------------------------------------
+        if self._has_y_missing and self._estimate_missing_from_parent:
+            with gil:
+                print("DEBUG entering estimate missing block")
+                print("DEBUG missing prior:")
+                print(np.asarray(self._missing_prior))
+            for p in range(start, end):
+                i = sample_indices[p]
+
+                w = 1.0
+                if sample_weight is not None:
+                    w = sample_weight[i]
+
+                for k in range(self.n_outputs):
+                    if self._y_missing[i, k]:
+                        for c in range(self.n_classes[k]):
+                            self.sum_total[k, c] += w * self._missing_prior[k, c]
 
         # Reset to pos=start
         self.reset()
@@ -433,7 +484,20 @@ cdef class ClassificationCriterion(Criterion):
         self._y_missing = arr
         self._has_y_missing = True
 
+    cpdef set_missing_clustering_attr_handling(self, object mode):
+        cdef str s = str(mode)
 
+        if s in ("estimate_from_parent_node", "EstimateFromParentNode", "parent_node"):
+            self._estimate_missing_from_parent = True
+        elif s in ("ignore", "Ignore", "none", "None"):
+            self._estimate_missing_from_parent = False
+        else:
+            raise ValueError(
+                "missing_clustering_attr_handling must be one of "
+                "{'estimate_from_parent_node', 'ignore'}"
+            )
+        print("DEBUG Cython mode:", mode)
+        print("DEBUG estimate flag before:", self._estimate_missing_from_parent)
     cdef void init_sum_missing(self):
         """Init sum_missing to hold sums for missing values."""
         self.sum_missing = np.zeros((self.n_outputs, self.max_n_classes), dtype=np.float64)
@@ -543,7 +607,11 @@ cdef class ClassificationCriterion(Criterion):
 
                 for k in range(self.n_outputs):
                     if self._has_y_missing and self._y_missing[i, k]:
+                        if self._estimate_missing_from_parent:
+                            for c in range(self.n_classes[k]):
+                                self.sum_left[k, c] += w * self._missing_prior[k, c]
                         continue
+
                     self.sum_left[k, <intp_t> self.y[i, k]] += w
 
                 self.weighted_n_left += w
@@ -559,7 +627,11 @@ cdef class ClassificationCriterion(Criterion):
 
                 for k in range(self.n_outputs):
                     if self._has_y_missing and self._y_missing[i, k]:
+                        if self._estimate_missing_from_parent:
+                            for c in range(self.n_classes[k]):
+                                self.sum_left[k, c] -= w * self._missing_prior[k, c]
                         continue
+
                     self.sum_left[k, <intp_t> self.y[i, k]] -= w
 
                 self.weighted_n_left -= w
@@ -953,7 +1025,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                     count_k = self.sum_total[o, c]
                     if count_k > 0.0:
                         p = count_k / total_o
-                        impur -= w * p * (log(p) / log(2.0))
+                        impur -= w * total_o * p * (log(p) / log(2.0))
         else:
             for o in range(self._ssl_n_desc, self.n_outputs):
                 w = self._w(o)
@@ -971,7 +1043,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                     count_k = self.sum_total[o, c]
                     if count_k > 0.0:
                         p = count_k / total_o
-                        impur -= w * p * (log(p) / log(2.0))
+                        impur -= w * total_o * p * (log(p) / log(2.0))
 
         return impur
 
@@ -1012,7 +1084,8 @@ cdef class ClusEntropy(ClassificationCriterion):
                         count_k = self.sum_left[o, c]
                         if count_k > 0.0:
                             p = count_k / total_o
-                            left -= w * p * (log(p) / log(2.0))
+                            left -= w * total_o * p * (log(p) / log(2.0))
+
 
                 total_o = 0.0
                 for c in range(self.n_classes[o]):
@@ -1022,7 +1095,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                         count_k = self.sum_right[o, c]
                         if count_k > 0.0:
                             p = count_k / total_o
-                            right -= w * p * (log(p) / log(2.0))
+                            right -= w * total_o * p * (log(p) / log(2.0))
         else:
             for o in range(self._ssl_n_desc, self.n_outputs):
                 w = self._w(o)
@@ -1037,7 +1110,7 @@ cdef class ClusEntropy(ClassificationCriterion):
                         count_k = self.sum_left[o, c]
                         if count_k > 0.0:
                             p = count_k / total_o
-                            left -= w * p * (log(p) / log(2.0))
+                            left -= w * total_o * p * (log(p) / log(2.0))
 
                 total_o = 0.0
                 for c in range(self.n_classes[o]):
@@ -1047,10 +1120,26 @@ cdef class ClusEntropy(ClassificationCriterion):
                         count_k = self.sum_right[o, c]
                         if count_k > 0.0:
                             p = count_k / total_o
-                            right -= w * p * (log(p) / log(2.0))
+                            right -= w * total_o * p * (log(p) / log(2.0))
 
         impurity_left[0] = left
         impurity_right[0] = right
+    cdef float64_t impurity_improvement(
+        self,
+        float64_t impurity_parent,
+        float64_t impurity_left,
+        float64_t impurity_right
+    ) noexcept nogil:
+        return impurity_parent - impurity_left - impurity_right
+
+    cdef float64_t proxy_impurity_improvement(self) noexcept nogil:
+        cdef float64_t impurity_left
+        cdef float64_t impurity_right
+
+        self.children_impurity(&impurity_left, &impurity_right)
+
+        return - impurity_left - impurity_right
+
 cdef class ClusGini(ClassificationCriterion):
     """CLUS-style Gini.
 
@@ -1207,7 +1296,7 @@ cdef class ClusGini(ClassificationCriterion):
                         p = count_k / total_o
                         s += p * p
 
-                impur += w * (1.0 - s)
+                impur += w * total_o * (1.0 - s)
         else:
             for o in range(self._ssl_n_desc, self.n_outputs):
                 w = self._w(o)
@@ -1228,7 +1317,7 @@ cdef class ClusGini(ClassificationCriterion):
                         p = count_k / total_o
                         s += p * p
 
-                impur += w * (1.0 - s)
+                impur += w * total_o * (1.0 - s)
 
         return impur
 
@@ -1271,7 +1360,7 @@ cdef class ClusGini(ClassificationCriterion):
                         if count_k > 0.0:
                             p = count_k / total_o
                             s += p * p
-                    left += w * (1.0 - s)
+                    left += w * total_o * (1.0 - s)
 
                 total_o = 0.0
                 for c in range(self.n_classes[o]):
@@ -1283,7 +1372,7 @@ cdef class ClusGini(ClassificationCriterion):
                         if count_k > 0.0:
                             p = count_k / total_o
                             s += p * p
-                    right += w * (1.0 - s)
+                    right += w * total_o * (1.0 - s)
         else:
             for o in range(self._ssl_n_desc, self.n_outputs):
                 w = self._w(o)
@@ -1300,7 +1389,7 @@ cdef class ClusGini(ClassificationCriterion):
                         if count_k > 0.0:
                             p = count_k / total_o
                             s += p * p
-                    left += w * (1.0 - s)
+                    left += w * total_o * (1.0 - s)
 
                 total_o = 0.0
                 for c in range(self.n_classes[o]):
@@ -1312,10 +1401,24 @@ cdef class ClusGini(ClassificationCriterion):
                         if count_k > 0.0:
                             p = count_k / total_o
                             s += p * p
-                    right += w * (1.0 - s)
+                    right += w * total_o * (1.0 - s)
 
         impurity_left[0] = left
         impurity_right[0] = right
+    cdef float64_t impurity_improvement(
+        self,
+        float64_t impurity_parent,
+        float64_t impurity_left,
+        float64_t impurity_right
+    ) noexcept nogil:
+        return impurity_parent - impurity_left - impurity_right
+    cdef float64_t proxy_impurity_improvement(self) noexcept nogil:
+        cdef float64_t impurity_left
+        cdef float64_t impurity_right
+
+        self.children_impurity(&impurity_left, &impurity_right)
+
+        return - impurity_left - impurity_right
 cdef inline void _move_sums_regression(
     RegressionCriterion criterion,
     float64_t[::1] sum_1,

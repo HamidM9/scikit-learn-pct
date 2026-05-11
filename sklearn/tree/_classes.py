@@ -510,7 +510,11 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             )
         y_missing_mask_target = getattr(self, "_pct_missing_mask_", None)
         y_missing_mask_clust = getattr(self, "_pct_missing_mask_clust_", None)
-
+        print("DEBUG criterion:", type(criterion))
+        print("DEBUG has set_y_missing_mask:", hasattr(criterion, "set_y_missing_mask"))
+        print("DEBUG missing mask shape:", None if y_missing_mask_clust is None else y_missing_mask_clust.shape)
+        print("DEBUG missing mask:")
+        print(y_missing_mask_clust)
         if hasattr(criterion, "set_y_missing_mask"):
             if pct_y_clust is not None and y_missing_mask_clust is not None:
                 criterion.set_y_missing_mask(
@@ -524,7 +528,13 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 criterion.set_y_missing_mask(
                     np.asarray(np.isnan(y), dtype=np.uint8)
                 )
+        if hasattr(criterion, "set_missing_clustering_attr_handling"):
+            criterion.set_missing_clustering_attr_handling("estimate_from_parent_node")
+            print("DEBUG missing clustering handling set to estimate_from_parent_node")
+        else:
+            print("DEBUG criterion has no set_missing_clustering_attr_handling")
 
+        
 
         SPLITTERS = SPARSE_SPLITTERS if issparse(X) else DENSE_SPLITTERS
 
@@ -1824,11 +1834,7 @@ class PCTClassifier(DecisionTreeClassifier):
         # SSL classification must add descriptive_x, otherwise unlabeled
         # rows cannot affect split scoring.
         # ------------------------------------------------------------------
-        if self.ssl and self.ssl_method == "clus_pct":
-            if roles_xy["clustering_x"].size == 0:
-                roles_xy["clustering_x"] = roles_xy["descriptive_x"].copy()
 
-            self._pct_feature_roles_xy = roles_xy
 
         # ------------------------------------------------------------------
         # Classification v1 restrictions
@@ -1986,19 +1992,14 @@ class PCTClassifier(DecisionTreeClassifier):
         # Classification must pass integer labels to the underlying sklearn path
         y_target_train = y_target_train.astype(np.intp)
 
-        # Training clustering view: impute only overlapping y-derived clustering columns
+        # Training clustering view:
+        # For CLUS parity, missing target-derived clustering values must be ignored
+        # by the impurity criterion, not imputed as default labels.
         y_clust_train = y_clust_raw.copy()
-        n_cx = roles_xy["clustering_x"].size
 
-        for j, y_col in enumerate(roles_xy["clustering_y"]):
-            clust_pos = n_cx + j
-            tgt_matches = np.where(roles_xy["target_y"] == y_col)[0]
-            if tgt_matches.size:
-                tgt_k = int(tgt_matches[0])
-                miss = missing_mask_target[:, tgt_k]
-                if np.any(miss):
-                    y_clust_train[miss, clust_pos] = default_model[tgt_k]
-
+        # sklearn/Cython still needs integer storage, so replace NaN with dummy 0.
+        # The real missingness must be handled through _pct_missing_mask_clust_.
+        y_clust_train[np.isnan(y_clust_train)] = 0
         y_clust_train = y_clust_train.astype(np.intp)
 
         use_ssl_pct = bool(self.ssl) and self.ssl_method == "clus_pct"
@@ -2023,7 +2024,6 @@ class PCTClassifier(DecisionTreeClassifier):
 
         if use_ssl_pct and np.isclose(self.ssl_weight_, 1.0):
             fit_rows = np.flatnonzero(~np.any(missing_mask_target, axis=1))
-
         X_fit = X[fit_rows]
         sample_weight_fit = None if sample_weight is None else sample_weight[fit_rows]
         y_target_train_fit = y_target_train[fit_rows]
@@ -2042,11 +2042,17 @@ class PCTClassifier(DecisionTreeClassifier):
                         "SSL-PCT classification requires at least one clustering attribute."
                     )
 
-                weights = np.empty(n_total, dtype=np.float64)
+                # If clustering contains only Y, w should not change the relative weighting.
+                # This matches CLUS behavior for Clustering = 4-6.
+                if n_cx == 0:
+                    weights = np.ones(n_cy, dtype=np.float64)
 
-                if n_cx > 0:
+                elif n_cy == 0:
+                    weights = np.ones(n_cx, dtype=np.float64)
+
+                else:
+                    weights = np.empty(n_total, dtype=np.float64)
                     weights[:n_cx] = (1.0 - self.ssl_weight_) * (n_total / n_cx)
-                if n_cy > 0:
                     weights[n_cx:] = self.ssl_weight_ * (n_total / n_cy)
 
                 self.target_weights = weights
@@ -2070,6 +2076,12 @@ class PCTClassifier(DecisionTreeClassifier):
                 ssl_raw_x_clust_fit = ssl_raw_x_clust[fit_rows]
                 ssl_n_descriptive = roles_xy["clustering_x"].size
 
+            old_pct_missing_mask = getattr(self, "_pct_missing_mask_", None)
+            old_pct_missing_mask_clust = getattr(self, "_pct_missing_mask_clust_", None)
+
+            self._pct_missing_mask_ = missing_mask_target[fit_rows]
+            self._pct_missing_mask_clust_ = self._pct_missing_mask_clust_[fit_rows]
+
             self._fit(
                 X_fit,
                 fit_y_value,
@@ -2079,6 +2091,9 @@ class PCTClassifier(DecisionTreeClassifier):
                 pct_ssl_raw_x_clust=ssl_raw_x_clust_fit,
                 pct_ssl_n_descriptive=ssl_n_descriptive,
             )
+
+            self._pct_missing_mask_ = old_pct_missing_mask
+            self._pct_missing_mask_clust_ = old_pct_missing_mask_clust
         finally:
             self.target_weights = old_target_weights
 

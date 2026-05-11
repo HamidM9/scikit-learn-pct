@@ -100,6 +100,7 @@ cdef class ClassificationCriterion(Criterion):
     """Abstract criterion for classification."""
 
     cdef intp_t[::1] n_classes
+    cdef bint _missing_prior_initialized
     cdef intp_t max_n_classes
 
     cdef float64_t[:, ::1] sum_total    # The sum of the weighted count of each label.
@@ -109,7 +110,12 @@ cdef class ClassificationCriterion(Criterion):
     cdef cnp.uint8_t[:, ::1] _y_missing
     cdef bint _has_y_missing
     cpdef set_y_missing_mask(self, object y_missing)
+    cpdef set_missing_clustering_attr_handling(self, object mode)
     cdef object clustering_outputs #pct v1
+    cdef bint _estimate_missing_from_parent
+    cdef float64_t[:, ::1] _missing_prior
+
+
 
 cdef class RegressionCriterion(Criterion):
     """Abstract regression criterion."""
