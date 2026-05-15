@@ -455,8 +455,7 @@ cdef class ClassificationCriterion(Criterion):
         # ------------------------------------------------------------
         if self._has_y_missing and self._estimate_missing_from_parent:
             with gil:
-                print("DEBUG entering estimate missing block")
-                print("DEBUG missing prior:")
+
                 print(np.asarray(self._missing_prior))
             for p in range(start, end):
                 i = sample_indices[p]
@@ -496,8 +495,7 @@ cdef class ClassificationCriterion(Criterion):
                 "missing_clustering_attr_handling must be one of "
                 "{'estimate_from_parent_node', 'ignore'}"
             )
-        print("DEBUG Cython mode:", mode)
-        print("DEBUG estimate flag before:", self._estimate_missing_from_parent)
+
     cdef void init_sum_missing(self):
         """Init sum_missing to hold sums for missing values."""
         self.sum_missing = np.zeros((self.n_outputs, self.max_n_classes), dtype=np.float64)
@@ -870,7 +868,6 @@ cdef class Gini(ClassificationCriterion):
 
 
 
-# --- add near existing Entropy/Gini classes in sklearn/tree/_criterion.pyx ---
 
 cdef class ClusEntropy(ClassificationCriterion):
     """CLUS-style entropy.
@@ -1894,9 +1891,7 @@ cdef class MSE(RegressionCriterion):
         impurity_left[0] /= self.n_outputs
         impurity_right[0] /= self.n_outputs
 
-# new number.1 svars
 
-# new n.12 ssl
 cdef enum MissingClusHandling:
     MCH_IGNORE = 0
     MCH_PARENT = 1
@@ -2009,7 +2004,7 @@ cdef class SVarS(RegressionCriterion):
 
         impurity_left[0] = left_imp if n_eff_left > 0 else INFINITY
         impurity_right[0] = right_imp if n_eff_right > 0 else INFINITY
-# new number.X: svars weighted
+
 cdef class SVarSWeighted(RegressionCriterion):
     """Weighted sum of variances across outputs.
 
@@ -2019,15 +2014,15 @@ cdef class SVarSWeighted(RegressionCriterion):
 
     cdef const float64_t[::1] target_weights
     cdef bint has_target_weights
-    cdef intp_t end_non_missing  # new n.9 weighted svars
+    cdef intp_t end_non_missing
 
-    # new n.12 ssl
+
 
     def set_target_weights(self, const float64_t[::1] tw):
         # Called from Python land (with GIL) during tree build.
         self.target_weights = tw
         self.has_target_weights = tw is not None
-        # new n.12 ssl
+
 
     cpdef void set_missing_clustering_attr_handling(self, object mode):
         # For now: accept 'estimate_from_parent_node' and ignore everything else.

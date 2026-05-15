@@ -194,7 +194,6 @@ cdef class Splitter:
 
     def __setstate__(self, d):
         pass
-    # new n.11 split position and tie break
     def __reduce__(self):
         cdef object sp = "midpoint" if self.split_position_mode == 0 else "clus_exact"
         cdef object tb = "sklearn" if self.tie_break_mode == 0 else "clus"
@@ -575,7 +574,7 @@ cdef inline int node_split_best(
                 ):
                     # strictly better
                     best_proxy_improvement = current_proxy_improvement
-                    # ---- set threshold (your existing logic, or the new split_position switch) ----
+                  
                     if splitter.split_position_mode == 0:
                         current_split.threshold = (
                                 feature_values[p_prev] / 2.0 + feature_values[p] / 2.0

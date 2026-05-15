@@ -30,7 +30,7 @@ cdef class Criterion:
     cdef float64_t weighted_n_left            # Weighted number of samples in the left node
     cdef float64_t weighted_n_right           # Weighted number of samples in the right node
     cdef float64_t weighted_n_missing         # Weighted number of samples that are missing
-    # new n.8 weighted svars
+
 
     cdef float64_t[::1] _sq_sum_left_buf
     cdef float64_t[::1] sq_sum_total_per_output
@@ -111,7 +111,7 @@ cdef class ClassificationCriterion(Criterion):
     cdef bint _has_y_missing
     cpdef set_y_missing_mask(self, object y_missing)
     cpdef set_missing_clustering_attr_handling(self, object mode)
-    cdef object clustering_outputs #pct v1
+    cdef object clustering_outputs 
     cdef bint _estimate_missing_from_parent
     cdef float64_t[:, ::1] _missing_prior
 

@@ -52,7 +52,6 @@ from sklearn.utils.validation import (
     check_is_fitted,
     validate_data,
 )
-# new n.4
 __all__ = [
     "DecisionTreeClassifier",
     "DecisionTreeRegressor",
@@ -66,7 +65,6 @@ __all__ = [
 # =============================================================================
 # Types and constants
 # =============================================================================
-# new n.3 svars-svarsweighted
 DTYPE = _tree.DTYPE
 DOUBLE = _tree.DOUBLE
 
@@ -510,10 +508,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             )
         y_missing_mask_target = getattr(self, "_pct_missing_mask_", None)
         y_missing_mask_clust = getattr(self, "_pct_missing_mask_clust_", None)
-        print("DEBUG criterion:", type(criterion))
-        print("DEBUG has set_y_missing_mask:", hasattr(criterion, "set_y_missing_mask"))
-        print("DEBUG missing mask shape:", None if y_missing_mask_clust is None else y_missing_mask_clust.shape)
-        print("DEBUG missing mask:")
+
         print(y_missing_mask_clust)
         if hasattr(criterion, "set_y_missing_mask"):
             if pct_y_clust is not None and y_missing_mask_clust is not None:
@@ -530,7 +525,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 )
         if hasattr(criterion, "set_missing_clustering_attr_handling"):
             criterion.set_missing_clustering_attr_handling("estimate_from_parent_node")
-            print("DEBUG missing clustering handling set to estimate_from_parent_node")
+
         else:
             print("DEBUG criterion has no set_missing_clustering_attr_handling")
 
@@ -577,7 +572,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 # Since self.monotonic_cst encodes constraints on probabilities of the
                 # *positive class*, all signs must be flipped.
                 monotonic_cst *= -1
-#numberthree
+
         if not isinstance(self.splitter, Splitter):
             split_position_mode = 1 if getattr(self, "split_position", "midpoint") == "clus_exact" else 0
             tie_break_mode = 1 if getattr(self, "tie_break", "sklearn") == "clus" else 0
@@ -605,7 +600,6 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                     np.array(roles_xy["descriptive_x"], dtype=np.intp, copy=True)
                 )
 
-        # new n.11 split position and tie break
         if is_classifier(self):
             self.tree_ = Tree(self.n_features_in_, self.n_classes_, self.n_outputs_)
         else:
@@ -1346,7 +1340,6 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
         tags.classifier_tags.multi_label = True
         tags.input_tags.allow_nan = allow_nan
         return tags
-# new n.6 introduce PCTClassifier
 class PCTClassifier(DecisionTreeClassifier):
     """Predictive Clustering Tree classifier (CLUS-compatible prototype)."""
 #numberone
@@ -2479,7 +2472,6 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
     # "check_input" is used for optimisation and isn't something to be passed
     # around in a pipeline.
     __metadata_request__fit = {"check_input": metadata_routing.UNUSED}
-    #new n.2 add svars
     _parameter_constraints: dict = {
         **BaseDecisionTree._parameter_constraints,
         "criterion": [
@@ -2765,7 +2757,6 @@ class PCTRegressor(DecisionTreeRegressor):
 
 
 
-# new n.11 fit and pred
     def _get_n_outputs_for_role_schema(self, y):
         if y.ndim == 1:
             return 1
