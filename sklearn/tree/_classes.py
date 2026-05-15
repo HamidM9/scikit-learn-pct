@@ -25,6 +25,7 @@ from sklearn.base import (
     is_classifier,
 )
 from sklearn.tree import _criterion, _splitter, _tree
+from sklearn.tree._clus_cv import ClusXValSelection
 from sklearn.tree._criterion import Criterion
 from sklearn.tree._splitter import Splitter
 from sklearn.tree._tree import (
@@ -661,6 +662,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         self._prune_tree()
 
         return self
+
 
     def _validate_X_predict(self, X, check_input):
         """Validate the training data on predict (probabilities)."""
@@ -1358,6 +1360,7 @@ class PCTClassifier(DecisionTreeClassifier):
         "ssl_possible_weights": ["array-like", None],
         "ssl_internal_folds": [Interval(Integral, 2, None, closed="left")],
         "ssl_pruning_when_tuning": [bool],
+        "hmlc_weight": [Interval(Real, 0.0, 1.0, closed="both")],
 
     }
 
@@ -1399,6 +1402,8 @@ class PCTClassifier(DecisionTreeClassifier):
         hmlc_consistency="ancestors",
         hmlc_threshold=0.5,
 
+        hmlc_weight=0.75,
+
     ):
         self.compat_mode = compat_mode
         self.target_weights = target_weights
@@ -1420,6 +1425,7 @@ class PCTClassifier(DecisionTreeClassifier):
         self.hierarchy_type = hierarchy_type
         self.hmlc_consistency = hmlc_consistency
         self.hmlc_threshold = hmlc_threshold
+        self.hmlc_weight = hmlc_weight
         super().__init__(
             criterion=criterion,
             splitter=splitter,
@@ -1671,7 +1677,7 @@ class PCTClassifier(DecisionTreeClassifier):
         missing_mask_target,
     ):
         from sklearn.metrics import accuracy_score
-        from sklearn.model_selection import KFold
+        from sklearn.tree._clus_cv import ClusXValSelection
 
         grid = self._resolve_ssl_weight_grid()
         if grid is None:
@@ -1687,10 +1693,9 @@ class PCTClassifier(DecisionTreeClassifier):
         if labeled_idx.size < self.ssl_internal_folds:
             return float(grid[-1])
 
-        cv = KFold(
+        cv = ClusXValSelection(
             n_splits=self.ssl_internal_folds,
-            shuffle=True,
-            random_state=self.random_state,
+            random_state=0 if self.random_state is None else self.random_state,
         )
 
         best_w = None
@@ -1699,7 +1704,7 @@ class PCTClassifier(DecisionTreeClassifier):
         for w in grid:
             scores = []
 
-            for tr_sub, va_sub in cv.split(labeled_idx):
+            for tr_sub, va_sub in cv.split(labeled_idx.reshape(-1, 1)):
                 train_lab_idx = labeled_idx[tr_sub]
                 valid_lab_idx = labeled_idx[va_sub]
 
@@ -1861,6 +1866,23 @@ class PCTClassifier(DecisionTreeClassifier):
 
 
         roles_xy = self._pct_feature_roles_xy
+        if self.hmlc:
+            self._hmlc_path_to_index, self._hmlc_parent_map = self._parse_hmlc_paths()
+
+            n_outputs = y_arr.shape[1]
+
+            if len(self._hmlc_path_to_index) != n_outputs:
+                raise ValueError(
+                    "The number of labels in hierarchy does not match y.shape[1]. "
+                    f"Got {len(self._hmlc_path_to_index)} hierarchy labels and "
+                    f"{n_outputs} target columns."
+                )
+
+            self._hmlc_label_to_index = {
+                idx: idx for idx in range(n_outputs)
+            }
+
+            self._hmlc_label_weights_ = self._compute_hmlc_label_weights()
         # ------------------------------------------------------------------
         # CLUS-style SSL-PCT classification default:
         # clustering space = descriptive X + target Y
@@ -2069,7 +2091,13 @@ class PCTClassifier(DecisionTreeClassifier):
         y_clust_train_fit = y_clust_train[fit_rows]
 
         old_target_weights = self.target_weights
+        if self.hmlc and not use_ssl_pct:
+            hmlc_weights = self._hmlc_label_weights_[roles_xy["clustering_y"]]
 
+            if old_target_weights is None:
+                self.target_weights = hmlc_weights
+            else:
+                self.target_weights = np.asarray(old_target_weights, dtype=np.float64) * hmlc_weights
         try:
             if use_ssl_pct:
                 n_cx = roles_xy["clustering_x"].size
@@ -2168,6 +2196,7 @@ class PCTClassifier(DecisionTreeClassifier):
         # This is especially important for SSL / missing-target cases, where
         # sklearn's tree_.value decoding may not equal CLUS leaf majority prototypes.
         self._compute_pct_clus_leaf_predictions(X, y_target_raw)
+
         return self
 
 
@@ -2176,8 +2205,60 @@ class PCTClassifier(DecisionTreeClassifier):
         # delegate to the standard sklearn training pipeline
         return super()._fit(X, y, sample_weight=sample_weight, check_input=check_input)
 
+    def _parse_hmlc_paths(self):
+        """Parse CLUS-style hierarchy paths into child -> ancestors mapping.
 
+        Example:
+            ["root/A", "root/A/B", "root/C"]
 
+        becomes:
+            {
+                1: [0],
+                2: [1, 0],
+            }
+        """
+        if not isinstance(self.hierarchy, (list, tuple)):
+            raise ValueError(
+                "For hierarchy_type='tree', hierarchy must be a list of CLUS-style paths, "
+                "for example ['root/A', 'root/A/B']."
+            )
+
+        label_to_index = {}
+        parent_map = {}
+
+        for path in self.hierarchy:
+            if not isinstance(path, str):
+                raise ValueError("All hierarchy paths must be strings.")
+
+            parts = [part for part in path.split("/") if part]
+            if len(parts) == 0:
+                continue
+
+            prefixes = ["/".join(parts[: i + 1]) for i in range(len(parts))]
+
+            for prefix in prefixes:
+                if prefix not in label_to_index:
+                    label_to_index[prefix] = len(label_to_index)
+
+            for i in range(1, len(prefixes)):
+                child = label_to_index[prefixes[i]]
+                ancestors = [
+                    label_to_index[prefixes[j]]
+                    for j in range(i - 1, -1, -1)
+                ]
+                parent_map[child] = ancestors
+
+        return label_to_index, parent_map
+
+    def _compute_hmlc_label_weights(self):
+        """Compute CLUS-style hierarchy weights: w(c) = hmlc_weight ** depth(c)."""
+        weights = np.ones(len(self._hmlc_path_to_index), dtype=np.float64)
+
+        for path, idx in self._hmlc_path_to_index.items():
+            depth = max(len([part for part in path.split("/") if part]) - 1, 0)
+            weights[idx] = self.hmlc_weight ** depth
+
+        return weights
     def _apply_missing_policy_to_proba(self, X, proba, check_input=True):
         """Adjust predicted probabilities for targets where leaf has no observed labels."""
         import numpy as np
@@ -2266,6 +2347,42 @@ class PCTClassifier(DecisionTreeClassifier):
         proba = super().predict_proba(X, check_input=check_input)
         return self._apply_missing_policy_to_proba(X, proba, check_input=check_input)
 
+    def predict_hmlc(self, X, check_input=True):
+        """Predict HMLC labels using probabilities and hmlc_threshold."""
+        if not self.hmlc:
+            raise ValueError("predict_hmlc is only available when hmlc=True.")
+
+        proba = self.predict_proba(X, check_input=check_input)
+
+        if self.n_outputs_ == 1:
+            positive_proba = proba[:, 1]
+            pred = (positive_proba >= self.hmlc_threshold).astype(np.intp).reshape(-1, 1)
+        else:
+            n_samples = proba[0].shape[0]
+            pred = np.zeros((n_samples, self.n_outputs_), dtype=np.intp)
+
+            for k in range(self.n_outputs_):
+                if proba[k].shape[1] == 1:
+                    positive_proba = np.zeros(n_samples, dtype=np.float64)
+                else:
+                    positive_proba = proba[k][:, 1]
+
+                pred[:, k] = positive_proba >= self.hmlc_threshold
+
+        return self._enforce_hierarchy_consistency(pred)
+    def _enforce_hierarchy_consistency(self, Y):
+        """Ensure that active child labels imply active ancestor labels."""
+        if self.hmlc_consistency == "none":
+            return Y
+
+        Y = np.asarray(Y).copy()
+
+        for child_idx, ancestor_indices in self._hmlc_parent_map.items():
+            for ancestor_idx in ancestor_indices:
+                Y[:, ancestor_idx] = np.maximum(Y[:, ancestor_idx], Y[:, child_idx])
+
+        return Y
+
     def predict(self, X, check_input=True):
         # CLUS-style PCT classifier prediction:
         # use stored leaf prototypes instead of raw sklearn probability decoding.
@@ -2277,6 +2394,9 @@ class PCTClassifier(DecisionTreeClassifier):
                 [self._pct_clus_leaf_predictions_[int(leaf)] for leaf in leaf_ids]
             )
 
+            if self.hmlc:
+                preds = self._enforce_hierarchy_consistency(preds)
+
             if preds.shape[1] == 1:
                 return preds.ravel()
 
@@ -2286,13 +2406,21 @@ class PCTClassifier(DecisionTreeClassifier):
         proba = self.predict_proba(X, check_input=check_input)
 
         if self.n_outputs_ == 1:
-            return self.classes_.take(proba.argmax(axis=1), axis=0)
+            preds = self.classes_.take(proba.argmax(axis=1), axis=0)
+
+            if self.hmlc:
+                preds = self._enforce_hierarchy_consistency(preds.reshape(-1, 1)).ravel()
+
+            return preds
 
         n_samples = X.shape[0]
         preds = np.zeros((n_samples, self.n_outputs_), dtype=self.classes_[0].dtype)
 
         for k in range(self.n_outputs_):
             preds[:, k] = self.classes_[k].take(proba[k].argmax(axis=1), axis=0)
+
+        if self.hmlc:
+            preds = self._enforce_hierarchy_consistency(preds)
 
         return preds
 
@@ -2645,7 +2773,8 @@ class PCTRegressor(DecisionTreeRegressor):
 
     - criterion="svars": sum of variances across outputs (no averaging by n_outputs).
     """
-
+    from sklearn.metrics import accuracy_score
+    from sklearn.tree._clus_cv import ClusXValSelection
     _parameter_constraints: dict = {
         **DecisionTreeRegressor._parameter_constraints,
         "compat_mode": [StrOptions({"clus_v1"})],
@@ -2989,10 +3118,9 @@ class PCTRegressor(DecisionTreeRegressor):
             # fallback: not enough labeled rows for internal CV
             return float(grid[-1])
 
-        cv = KFold(
+        cv = ClusXValSelection(
             n_splits=self.ssl_internal_folds,
-            shuffle=True,
-            random_state=self.random_state,
+            random_state=0 if self.random_state is None else self.random_state,
         )
 
         best_w = None
@@ -3001,7 +3129,7 @@ class PCTRegressor(DecisionTreeRegressor):
         for w in grid:
             scores = []
 
-            for tr_sub, va_sub in cv.split(labeled_idx):
+            for tr_sub, va_sub in cv.split(labeled_idx.reshape(-1, 1)):
                 train_lab_idx = labeled_idx[tr_sub]
                 valid_lab_idx = labeled_idx[va_sub]
 
