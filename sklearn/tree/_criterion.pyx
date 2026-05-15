@@ -1042,7 +1042,9 @@ cdef class ClusEntropy(ClassificationCriterion):
                         p = count_k / total_o
                         impur -= w * total_o * p * (log(p) / log(2.0))
 
-        return impur
+        if self.weighted_n_node_samples <= 0.0:
+            return 0.0
+        return impur / self.weighted_n_node_samples
 
     cdef void children_impurity(
         self,
@@ -1119,15 +1121,26 @@ cdef class ClusEntropy(ClassificationCriterion):
                             p = count_k / total_o
                             right -= w * total_o * p * (log(p) / log(2.0))
 
-        impurity_left[0] = left
-        impurity_right[0] = right
+        if self.weighted_n_left <= 0.0:
+            impurity_left[0] = 0.0
+        else:
+            impurity_left[0] = left / self.weighted_n_left
+
+        if self.weighted_n_right <= 0.0:
+            impurity_right[0] = 0.0
+        else:
+            impurity_right[0] = right / self.weighted_n_right
     cdef float64_t impurity_improvement(
-        self,
-        float64_t impurity_parent,
-        float64_t impurity_left,
-        float64_t impurity_right
+            self,
+            float64_t impurity_parent,
+            float64_t impurity_left,
+            float64_t impurity_right
     ) noexcept nogil:
-        return impurity_parent - impurity_left - impurity_right
+        return (
+                impurity_parent
+                - (self.weighted_n_right / self.weighted_n_node_samples) * impurity_right
+                - (self.weighted_n_left / self.weighted_n_node_samples) * impurity_left
+        )
 
     cdef float64_t proxy_impurity_improvement(self) noexcept nogil:
         cdef float64_t impurity_left
@@ -1135,7 +1148,10 @@ cdef class ClusEntropy(ClassificationCriterion):
 
         self.children_impurity(&impurity_left, &impurity_right)
 
-        return - impurity_left - impurity_right
+        return (
+                - (self.weighted_n_right / self.weighted_n_node_samples) * impurity_right
+                - (self.weighted_n_left / self.weighted_n_node_samples) * impurity_left
+        )
 
 cdef class ClusGini(ClassificationCriterion):
     """CLUS-style Gini.
@@ -1316,7 +1332,9 @@ cdef class ClusGini(ClassificationCriterion):
 
                 impur += w * total_o * (1.0 - s)
 
-        return impur
+        if self.weighted_n_node_samples <= 0.0:
+            return 0.0
+        return impur / self.weighted_n_node_samples
 
     cdef void children_impurity(
         self,
@@ -1400,22 +1418,36 @@ cdef class ClusGini(ClassificationCriterion):
                             s += p * p
                     right += w * total_o * (1.0 - s)
 
-        impurity_left[0] = left
-        impurity_right[0] = right
+        if self.weighted_n_left <= 0.0:
+            impurity_left[0] = 0.0
+        else:
+            impurity_left[0] = left / self.weighted_n_left
+
+        if self.weighted_n_right <= 0.0:
+            impurity_right[0] = 0.0
+        else:
+            impurity_right[0] = right / self.weighted_n_right
     cdef float64_t impurity_improvement(
-        self,
-        float64_t impurity_parent,
-        float64_t impurity_left,
-        float64_t impurity_right
+            self,
+            float64_t impurity_parent,
+            float64_t impurity_left,
+            float64_t impurity_right
     ) noexcept nogil:
-        return impurity_parent - impurity_left - impurity_right
+        return (
+                impurity_parent
+                - (self.weighted_n_right / self.weighted_n_node_samples) * impurity_right
+                - (self.weighted_n_left / self.weighted_n_node_samples) * impurity_left
+        )
     cdef float64_t proxy_impurity_improvement(self) noexcept nogil:
         cdef float64_t impurity_left
         cdef float64_t impurity_right
 
         self.children_impurity(&impurity_left, &impurity_right)
 
-        return - impurity_left - impurity_right
+        return (
+                - (self.weighted_n_right / self.weighted_n_node_samples) * impurity_right
+                - (self.weighted_n_left / self.weighted_n_node_samples) * impurity_left
+        )
 cdef inline void _move_sums_regression(
     RegressionCriterion criterion,
     float64_t[::1] sum_1,

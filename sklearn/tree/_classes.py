@@ -1393,6 +1393,12 @@ class PCTClassifier(DecisionTreeClassifier):
         ssl_internal_folds=4,
         ssl_pruning_when_tuning=False,
 
+        hmlc=False,
+        hierarchy=None,
+        hierarchy_type="tree",
+        hmlc_consistency="ancestors",
+        hmlc_threshold=0.5,
+
     ):
         self.compat_mode = compat_mode
         self.target_weights = target_weights
@@ -1409,7 +1415,11 @@ class PCTClassifier(DecisionTreeClassifier):
         self.ssl_possible_weights = ssl_possible_weights
         self.ssl_internal_folds = ssl_internal_folds
         self.ssl_pruning_when_tuning = ssl_pruning_when_tuning
-
+        self.hmlc = hmlc
+        self.hierarchy = hierarchy
+        self.hierarchy_type = hierarchy_type
+        self.hmlc_consistency = hmlc_consistency
+        self.hmlc_threshold = hmlc_threshold
         super().__init__(
             criterion=criterion,
             splitter=splitter,
@@ -1818,6 +1828,38 @@ class PCTClassifier(DecisionTreeClassifier):
         self._pct_feature_roles_xy = self._split_resolved_roles_into_x_and_y(
             self._pct_feature_roles
         )
+
+        # Validate HMLC options.
+        if self.hmlc:
+            if self.hierarchy is None:
+                raise ValueError("hierarchy must be provided when hmlc=True")
+
+            if self.hierarchy_type not in {"tree", "dag"}:
+                raise ValueError(
+                    "hierarchy_type must be one of {'tree', 'dag'}, "
+                    f"got {self.hierarchy_type!r}"
+                )
+
+            if self.hmlc_consistency not in {"ancestors", "none"}:
+                raise ValueError(
+                    "hmlc_consistency must be one of {'ancestors', 'none'}, "
+                    f"got {self.hmlc_consistency!r}"
+                )
+
+            if not isinstance(self.hmlc_threshold, numbers.Real):
+                raise ValueError(
+                    "hmlc_threshold must be a real number, "
+                    f"got {type(self.hmlc_threshold).__name__}"
+                )
+
+            if not 0.0 <= self.hmlc_threshold <= 1.0:
+                raise ValueError(
+                    "hmlc_threshold must be in [0.0, 1.0], "
+                    f"got {self.hmlc_threshold}"
+                )
+
+
+
         roles_xy = self._pct_feature_roles_xy
         # ------------------------------------------------------------------
         # CLUS-style SSL-PCT classification default:
@@ -1827,7 +1869,11 @@ class PCTClassifier(DecisionTreeClassifier):
         # SSL classification must add descriptive_x, otherwise unlabeled
         # rows cannot affect split scoring.
         # ------------------------------------------------------------------
+        if self.ssl and self.ssl_method == "clus_pct":
+            if roles_xy["clustering_x"].size == 0:
+                roles_xy["clustering_x"] = roles_xy["descriptive_x"].copy()
 
+            self._pct_feature_roles_xy = roles_xy
 
         # ------------------------------------------------------------------
         # Classification v1 restrictions
@@ -2123,6 +2169,8 @@ class PCTClassifier(DecisionTreeClassifier):
         # sklearn's tree_.value decoding may not equal CLUS leaf majority prototypes.
         self._compute_pct_clus_leaf_predictions(X, y_target_raw)
         return self
+
+
 
     def _fit_pct(self, X, y, sample_weight=None, check_input=True):
         # delegate to the standard sklearn training pipeline
