@@ -510,7 +510,6 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         y_missing_mask_target = getattr(self, "_pct_missing_mask_", None)
         y_missing_mask_clust = getattr(self, "_pct_missing_mask_clust_", None)
 
-        print(y_missing_mask_clust)
         if hasattr(criterion, "set_y_missing_mask"):
             if pct_y_clust is not None and y_missing_mask_clust is not None:
                 criterion.set_y_missing_mask(
@@ -527,8 +526,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         if hasattr(criterion, "set_missing_clustering_attr_handling"):
             criterion.set_missing_clustering_attr_handling("estimate_from_parent_node")
 
-        else:
-            print("DEBUG criterion has no set_missing_clustering_attr_handling")
+        
 
         
 

@@ -454,9 +454,7 @@ cdef class ClassificationCriterion(Criterion):
         # Second pass: if enabled, estimate missing labels from prior.
         # ------------------------------------------------------------
         if self._has_y_missing and self._estimate_missing_from_parent:
-            with gil:
 
-                print(np.asarray(self._missing_prior))
             for p in range(start, end):
                 i = sample_indices[p]
 
