@@ -1943,7 +1943,27 @@ cdef class SVarS(RegressionCriterion):
       Per-target missing handling requires extending RegressionCriterion with per-output
       weight counters, which we will add later under your "missing target handling" plan.
     """
+    cdef float64_t _critical_f(self, int level, int df) noexcept nogil:
+        if level <= 0:
+            return 0.0
 
+        elif level == 1:
+            return 2.7
+
+        elif level == 2:
+            return 3.84
+
+        elif level == 3:
+            return 6.63
+
+        elif level == 4:
+            return 7.90
+
+        return 10.82
+
+    cdef int ftest_level
+    cpdef void set_ftest_level(self, int level):
+        self.ftest_level = level
     cdef float64_t node_impurity(self) noexcept nogil:
         cdef float64_t impurity = 0.0
         cdef float64_t Wk, invWk, Sk
@@ -1976,8 +1996,61 @@ cdef class SVarS(RegressionCriterion):
             if self.sum_w_right[k] > 0.0:
                 right_term += (self.sum_right[k] * self.sum_right[k]) / self.sum_w_right[k]
 
-        return left_term + right_term
+        cdef float64_t score = left_term + right_term
 
+        cdef float64_t improvement
+        
+
+        return score
+    cdef float64_t impurity_improvement(
+        self,
+        float64_t impurity_parent,
+        float64_t impurity_left,
+        float64_t impurity_right,
+    ) noexcept nogil:
+        cdef float64_t improvement
+        cdef float64_t rel_gain
+
+        improvement = (
+            (self.weighted_n_node_samples / self.weighted_n_samples)
+            * (
+                impurity_parent
+                - (self.weighted_n_right / self.weighted_n_node_samples * impurity_right)
+                - (self.weighted_n_left / self.weighted_n_node_samples * impurity_left)
+            )
+        )
+        cdef float64_t sst
+        cdef float64_t ssr
+        cdef float64_t f_value
+        cdef float64_t critical_f
+        cdef int df
+        if self.ftest_level > 0:
+
+
+            sst = impurity_parent * self.weighted_n_node_samples
+            ssr = (
+                impurity_left * self.weighted_n_left
+                + impurity_right * self.weighted_n_right
+            )
+
+            if sst <= 0.0:
+                return -INFINITY
+
+            if ssr == 0.0:
+                return improvement
+
+            df = <int>(self.weighted_n_node_samples - 2.0 + 0.5)
+
+            if df <= 0:
+                return -INFINITY
+
+            f_value = df * (sst - ssr) / ssr
+            critical_f = self._critical_f(self.ftest_level, df)
+
+            if f_value <= critical_f:
+                return -INFINITY
+
+        return improvement
     cdef void children_impurity(
         self, float64_t* impurity_left, float64_t* impurity_right
     ) noexcept nogil:
@@ -2041,11 +2114,27 @@ cdef class SVarSWeighted(RegressionCriterion):
     WeightedSVarS = sum_k alpha_k * Var(y_k)
     where Var(y_k) = Q_k/W - (S_k/W)^2
     """
+    cdef float64_t _critical_f(self, int level, int df) noexcept nogil:
+        if level <= 0:
+            return 0.0
 
+        elif level == 1:
+            return 2.7
+
+        elif level == 2:
+            return 3.84
+
+        elif level == 3:
+            return 6.63
+
+        elif level == 4:
+            return 7.90
+
+        return 10.82
     cdef const float64_t[::1] target_weights
     cdef bint has_target_weights
     cdef intp_t end_non_missing
-
+    cdef int ftest_level
 
 
     def set_target_weights(self, const float64_t[::1] tw):
@@ -2053,7 +2142,8 @@ cdef class SVarSWeighted(RegressionCriterion):
         self.target_weights = tw
         self.has_target_weights = tw is not None
 
-
+    cpdef void set_ftest_level(self, int level):
+        self.ftest_level = level
     cpdef void set_missing_clustering_attr_handling(self, object mode):
         # For now: accept 'estimate_from_parent_node' and ignore everything else.
         # Do NOT store on self (no new attributes).
@@ -2109,8 +2199,63 @@ cdef class SVarSWeighted(RegressionCriterion):
             if self.sum_w_right[k] > 0.0:
                 right_term += wk * (self.sum_right[k] * self.sum_right[k]) / self.sum_w_right[k]
 
-        return left_term + right_term
+        cdef float64_t score = left_term + right_term
 
+        # First conservative CLUS-style F-test gate.
+        # level 0 means disabled. Higher levels require stronger improvements.
+
+
+
+        return score
+    cdef float64_t impurity_improvement(
+        self,
+        float64_t impurity_parent,
+        float64_t impurity_left,
+        float64_t impurity_right,
+    ) noexcept nogil:
+        cdef float64_t improvement
+        cdef float64_t rel_gain
+
+        improvement = (
+            (self.weighted_n_node_samples / self.weighted_n_samples)
+            * (
+                impurity_parent
+                - (self.weighted_n_right / self.weighted_n_node_samples * impurity_right)
+                - (self.weighted_n_left / self.weighted_n_node_samples * impurity_left)
+            )
+        )
+        cdef float64_t sst
+        cdef float64_t ssr
+        cdef float64_t f_value
+        cdef float64_t critical_f
+        cdef int df
+        if self.ftest_level > 0:
+
+
+            sst = impurity_parent * self.weighted_n_node_samples
+            ssr = (
+                    impurity_left * self.weighted_n_left
+                    + impurity_right * self.weighted_n_right
+            )
+
+            if sst <= 0.0:
+                return -INFINITY
+
+            if ssr == 0.0:
+                return improvement
+
+            df = <int> (self.weighted_n_node_samples - 2.0 + 0.5)
+
+            if df <= 0:
+                return -INFINITY
+
+            f_value = df * (sst - ssr) / ssr
+            critical_f = self._critical_f(self.ftest_level, df)
+
+            if f_value <= critical_f:
+                return -INFINITY
+
+        return improvement
     cdef void children_impurity(self, float64_t* impurity_left, float64_t* impurity_right) noexcept nogil:
         cdef const float64_t[:] sample_weight = self.sample_weight
         cdef const intp_t[:] sample_indices = self.sample_indices

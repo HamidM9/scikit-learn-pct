@@ -119,6 +119,7 @@ def clus_classification_text(estimator, X, y, *, target_names=None):
         y_pred = y_pred.reshape(-1, 1)
 
     n_samples, n_outputs = y_true.shape
+    n_observed_examples = int(np.sum(~np.any(np.isnan(y_true), axis=1)))
 
     if target_names is None:
         target_names = [f"y{i + 1}" for i in range(n_outputs)]
@@ -144,8 +145,10 @@ def clus_classification_text(estimator, X, y, *, target_names=None):
         lines.append(f"   {block_name}: ")
 
         for k, name in enumerate(target_names):
-            yt = y_true[:, k].astype(int)
-            yp = block_pred[:, k].astype(int)
+            observed = ~np.isnan(y_true[:, k])
+
+            yt = y_true[observed, k].astype(int)
+            yp = block_pred[observed, k].astype(int)
 
             cm = confusion_matrix(yt, yp, labels=[1, 0])
             acc = accuracy_score(yt, yp)
