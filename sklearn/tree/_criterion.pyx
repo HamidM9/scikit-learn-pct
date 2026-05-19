@@ -1977,7 +1977,7 @@ cdef class SVarS(RegressionCriterion):
 
             invWk = 1.0 / Wk
             Sk = self.sum_total[k]
-            impurity += (self.sq_sum_total_per_output[k] * invWk) - (Sk * invWk) * (Sk * invWk)
+            impurity += self.sq_sum_total_per_output[k] - (Sk * Sk) / Wk
             n_effective += 1
 
         if n_effective == 0:
@@ -1986,22 +1986,15 @@ cdef class SVarS(RegressionCriterion):
         return impurity
 
     cdef float64_t proxy_impurity_improvement(self) noexcept nogil:
-        cdef intp_t k
-        cdef float64_t left_term = 0.0
-        cdef float64_t right_term = 0.0
+        cdef float64_t impurity_left
+        cdef float64_t impurity_right
 
-        for k in range(self.n_outputs):
-            if self.sum_w_left[k] > 0.0:
-                left_term += (self.sum_left[k] * self.sum_left[k]) / self.sum_w_left[k]
-            if self.sum_w_right[k] > 0.0:
-                right_term += (self.sum_right[k] * self.sum_right[k]) / self.sum_w_right[k]
+        self.children_impurity(
+            &impurity_left,
+            &impurity_right,
+        )
 
-        cdef float64_t score = left_term + right_term
-
-        cdef float64_t improvement
-        
-
-        return score
+        return self.node_impurity() - impurity_left - impurity_right
     cdef float64_t impurity_improvement(
         self,
         float64_t impurity_parent,
@@ -2012,12 +2005,9 @@ cdef class SVarS(RegressionCriterion):
         cdef float64_t rel_gain
 
         improvement = (
-            (self.weighted_n_node_samples / self.weighted_n_samples)
-            * (
                 impurity_parent
-                - (self.weighted_n_right / self.weighted_n_node_samples * impurity_right)
-                - (self.weighted_n_left / self.weighted_n_node_samples * impurity_left)
-            )
+                - impurity_left
+                - impurity_right
         )
         cdef float64_t sst
         cdef float64_t ssr
@@ -2051,6 +2041,7 @@ cdef class SVarS(RegressionCriterion):
                 return -INFINITY
 
         return improvement
+
     cdef void children_impurity(
         self, float64_t* impurity_left, float64_t* impurity_right
     ) noexcept nogil:
@@ -2096,17 +2087,21 @@ cdef class SVarS(RegressionCriterion):
             WkL = self.sum_w_left[k]
             if WkL > 0.0:
                 invWL = 1.0 / WkL
-                left_imp += (self._sq_sum_left_buf[k] * invWL) - (self.sum_left[k] * invWL) * (self.sum_left[k] * invWL)
+                left_imp += self._sq_sum_left_buf[k] - (self.sum_left[k] * self.sum_left[k]) / WkL
                 n_eff_left += 1
 
             WkR = self.sum_w_right[k]
             if WkR > 0.0:
                 invWR = 1.0 / WkR
-                right_imp += ((self.sq_sum_total_per_output[k] - self._sq_sum_left_buf[k]) * invWR) - (self.sum_right[k] * invWR) * (self.sum_right[k] * invWR)
+                right_imp += (
+                        self.sq_sum_total_per_output[k]
+                        - self._sq_sum_left_buf[k]
+                        - (self.sum_right[k] * self.sum_right[k]) / WkR
+                )
                 n_eff_right += 1
 
         impurity_left[0] = left_imp if n_eff_left > 0 else INFINITY
-        impurity_right[0] = right_imp if n_eff_right > 0 else INFINITY
+        impurity_right[0] = right_imp  if n_eff_right > 0 else INFINITY
 
 cdef class SVarSWeighted(RegressionCriterion):
     """Weighted sum of variances across outputs.
@@ -2175,8 +2170,7 @@ cdef class SVarSWeighted(RegressionCriterion):
             wk = self.target_weights[k] if self.has_target_weights else 1.0
 
             impurity += wk * (
-                self.sq_sum_total_per_output[k] * invWk
-                - (Sk * invWk) * (Sk * invWk)
+                    self.sq_sum_total_per_output[k] - (Sk * Sk) / Wk
             )
             n_effective += 1
 
@@ -2186,27 +2180,22 @@ cdef class SVarSWeighted(RegressionCriterion):
         return impurity
 
     cdef float64_t proxy_impurity_improvement(self) noexcept nogil:
-        cdef intp_t k
-        cdef float64_t left_term = 0.0
-        cdef float64_t right_term = 0.0
-        cdef float64_t wk
+        cdef float64_t impurity_left
+        cdef float64_t impurity_right
 
-        for k in range(self.n_outputs):
-            wk = self.target_weights[k] if self.has_target_weights else 1.0
+        self.children_impurity(
+            &impurity_left,
+            &impurity_right,
+        )
 
-            if self.sum_w_left[k] > 0.0:
-                left_term += wk * (self.sum_left[k] * self.sum_left[k]) / self.sum_w_left[k]
-            if self.sum_w_right[k] > 0.0:
-                right_term += wk * (self.sum_right[k] * self.sum_right[k]) / self.sum_w_right[k]
-
-        cdef float64_t score = left_term + right_term
+        return self.node_impurity() - impurity_left - impurity_right
 
         # First conservative CLUS-style F-test gate.
         # level 0 means disabled. Higher levels require stronger improvements.
 
 
 
-        return score
+
     cdef float64_t impurity_improvement(
         self,
         float64_t impurity_parent,
@@ -2217,12 +2206,9 @@ cdef class SVarSWeighted(RegressionCriterion):
         cdef float64_t rel_gain
 
         improvement = (
-            (self.weighted_n_node_samples / self.weighted_n_samples)
-            * (
                 impurity_parent
-                - (self.weighted_n_right / self.weighted_n_node_samples * impurity_right)
-                - (self.weighted_n_left / self.weighted_n_node_samples * impurity_left)
-            )
+                - impurity_left
+                - impurity_right
         )
         cdef float64_t sst
         cdef float64_t ssr
@@ -2256,6 +2242,7 @@ cdef class SVarSWeighted(RegressionCriterion):
                 return -INFINITY
 
         return improvement
+
     cdef void children_impurity(self, float64_t* impurity_left, float64_t* impurity_right) noexcept nogil:
         cdef const float64_t[:] sample_weight = self.sample_weight
         cdef const intp_t[:] sample_indices = self.sample_indices
@@ -2302,8 +2289,8 @@ cdef class SVarSWeighted(RegressionCriterion):
             if WkL > 0.0:
                 invWL = 1.0 / WkL
                 left_imp += wk * (
-                    (self._sq_sum_left_buf[k] * invWL)
-                    - (self.sum_left[k] * invWL) * (self.sum_left[k] * invWL)
+                        self._sq_sum_left_buf[k]
+                        - (self.sum_left[k] * self.sum_left[k]) / WkL
                 )
                 n_eff_left += 1
 
@@ -2311,8 +2298,9 @@ cdef class SVarSWeighted(RegressionCriterion):
             if WkR > 0.0:
                 invWR = 1.0 / WkR
                 right_imp += wk * (
-                    ((self.sq_sum_total_per_output[k] - self._sq_sum_left_buf[k]) * invWR)
-                    - (self.sum_right[k] * invWR) * (self.sum_right[k] * invWR)
+                        self.sq_sum_total_per_output[k]
+                        - self._sq_sum_left_buf[k]
+                        - (self.sum_right[k] * self.sum_right[k]) / WkR
                 )
                 n_eff_right += 1
 

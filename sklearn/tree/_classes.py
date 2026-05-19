@@ -2800,9 +2800,9 @@ class PCTRegressor(DecisionTreeRegressor):
         "ssl_possible_weights": ["array-like", None],
         "ssl_internal_folds": [Interval(Integral, 2, None, closed="left")],
         "ssl_pruning_when_tuning": [bool],
+        "ssl_tune_weight": [bool],
     }
 
-    # new n.11 split position and tie break
 
 
 
@@ -2842,9 +2842,13 @@ class PCTRegressor(DecisionTreeRegressor):
         ssl=False,
         ssl_method="none",
         ssl_weight=None,
+
+        ssl_pruning_when_tuning=False,
+
+        #cross-validation
         ssl_possible_weights=None,
         ssl_internal_folds=4,
-        ssl_pruning_when_tuning=False,
+        ssl_tune_weight=False,
 
     ):
         # 1) Store CLUS-specific parameters (required for sklearn estimator API)
@@ -2869,6 +2873,7 @@ class PCTRegressor(DecisionTreeRegressor):
         self.ssl_possible_weights = ssl_possible_weights
         self.ssl_internal_folds = ssl_internal_folds
         self.ssl_pruning_when_tuning = ssl_pruning_when_tuning
+        self.ssl_tune_weight = ssl_tune_weight
 
         # 2) Delegate standard tree params to DecisionTreeRegressor
         super().__init__(
@@ -3331,16 +3336,22 @@ class PCTRegressor(DecisionTreeRegressor):
         use_ssl_pct = bool(self.ssl) and self.ssl_method == "clus_pct"
 
         if use_ssl_pct:
-            ssl_weight = self._select_ssl_weight_via_internal_cv(
-                X,
-                y_arr,
-                sample_weight,
-                check_input=check_input,
-                roles_xy=roles_xy,
-                y_clust_raw=y_clust_raw,
-                y_target_raw=y_target_raw,
-                missing_mask_target=missing_mask_target,
-            )
+            if self.ssl_tune_weight:
+                ssl_weight = self._select_ssl_weight_via_internal_cv(
+                    X,
+                    y_arr,
+                    sample_weight,
+                    check_input=check_input,
+                    roles_xy=roles_xy,
+                    y_clust_raw=y_clust_raw,
+                    y_target_raw=y_target_raw,
+                    missing_mask_target=missing_mask_target,
+                )
+            elif self.ssl_weight is not None:
+                ssl_weight = float(self.ssl_weight)
+            else:
+                ssl_weight = 1.0
+
             self.ssl_weight_ = float(ssl_weight)
         else:
             self.ssl_weight_ = None

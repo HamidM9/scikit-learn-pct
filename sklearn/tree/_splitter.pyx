@@ -414,6 +414,10 @@ cdef inline int node_split_best(
     cdef float64_t current_proxy_improvement = -INFINITY
     cdef float64_t best_proxy_improvement = -INFINITY
 
+    cdef float64_t current_impurity_left
+    cdef float64_t current_impurity_right
+    cdef float64_t current_improvement
+
     cdef float64_t impurity = parent_record.impurity
     cdef float64_t lower_bound = parent_record.lower_bound
     cdef float64_t upper_bound = parent_record.upper_bound
@@ -566,14 +570,26 @@ cdef inline int node_split_best(
                     continue
 
                 current_proxy_improvement = criterion.proxy_impurity_improvement()
+                criterion.children_impurity(
+                    &current_impurity_left,
+                    &current_impurity_right,
+                )
 
+                current_improvement = criterion.impurity_improvement(
+                    impurity,
+                    current_impurity_left,
+                    current_impurity_right,
+                )
+
+                if current_improvement == -INFINITY:
+                    continue
 
 
                 if (
                     current_proxy_improvement > best_proxy_improvement + TIE_EPS
                 ):
                     # strictly better
-                    best_proxy_improvement = current_proxy_improvement
+                    best_proxy_improvement = current_improvement
                   
                     if splitter.split_position_mode == 0:
                         current_split.threshold = (
@@ -612,9 +628,21 @@ cdef inline int node_split_best(
                 if not ((criterion.weighted_n_left < min_weight_leaf) or
                         (criterion.weighted_n_right < min_weight_leaf)):
                     current_proxy_improvement = criterion.proxy_impurity_improvement()
+                    criterion.children_impurity(
+                        &current_impurity_left,
+                        &current_impurity_right,
+                    )
 
-                    if current_proxy_improvement > best_proxy_improvement:
-                        best_proxy_improvement = current_proxy_improvement
+                    current_improvement = criterion.impurity_improvement(
+                        impurity,
+                        current_impurity_left,
+                        current_impurity_right,
+                    )
+
+                    if current_improvement == -INFINITY:
+                        continue
+                    if current_improvement > best_proxy_improvement:
+                        best_proxy_improvement = current_improvement
                         current_split.threshold = INFINITY
                         current_split.missing_go_to_left = missing_go_to_left
                         current_split.n_missing = n_missing
@@ -699,7 +727,9 @@ cdef inline int node_split_random(
     cdef SplitRecord best_split, current_split
     cdef float64_t current_proxy_improvement = - INFINITY
     cdef float64_t best_proxy_improvement = - INFINITY
-
+    cdef float64_t current_impurity_left
+    cdef float64_t current_impurity_right
+    cdef float64_t current_improvement
     cdef float64_t impurity = parent_record.impurity
     cdef float64_t lower_bound = parent_record.lower_bound
     cdef float64_t upper_bound = parent_record.upper_bound
@@ -861,8 +891,21 @@ cdef inline int node_split_random(
             continue
 
         current_proxy_improvement = criterion.proxy_impurity_improvement()
+        criterion.children_impurity(
+            &current_impurity_left,
+            &current_impurity_right,
+        )
+
+        current_improvement = criterion.impurity_improvement(
+            impurity,
+            current_impurity_left,
+            current_impurity_right,
+        )
+
+        if current_improvement == -INFINITY:
+            continue
         if current_proxy_improvement > best_proxy_improvement + TIE_EPS:
-            best_proxy_improvement = current_proxy_improvement
+            best_proxy_improvement = current_improvement
 
             # If no missing values were seen during training, sklearn sends
             # missing test values to the child with more samples.
