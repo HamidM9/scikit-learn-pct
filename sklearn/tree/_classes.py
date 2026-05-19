@@ -2801,6 +2801,7 @@ class PCTRegressor(DecisionTreeRegressor):
         "ssl_internal_folds": [Interval(Integral, 2, None, closed="left")],
         "ssl_pruning_when_tuning": [bool],
         "ssl_tune_weight": [bool],
+        "ssl_percentage_labeled": [Interval(Real, 0.0, 1.0, closed="both"), None],
     }
 
 
@@ -2849,6 +2850,7 @@ class PCTRegressor(DecisionTreeRegressor):
         ssl_possible_weights=None,
         ssl_internal_folds=4,
         ssl_tune_weight=False,
+        ssl_percentage_labeled=None,
 
     ):
         # 1) Store CLUS-specific parameters (required for sklearn estimator API)
@@ -2874,6 +2876,8 @@ class PCTRegressor(DecisionTreeRegressor):
         self.ssl_internal_folds = ssl_internal_folds
         self.ssl_pruning_when_tuning = ssl_pruning_when_tuning
         self.ssl_tune_weight = ssl_tune_weight
+        self.ssl_percentage_labeled = ssl_percentage_labeled
+
 
         # 2) Delegate standard tree params to DecisionTreeRegressor
         super().__init__(
@@ -3203,6 +3207,26 @@ class PCTRegressor(DecisionTreeRegressor):
         y_arr = np.asarray(y, dtype=np.float64)
         if y_arr.ndim == 1:
             y_arr = y_arr.reshape(-1, 1)
+
+        if (
+                self.ssl
+                and self.ssl_method == "clus_pct"
+                and self.ssl_percentage_labeled is not None
+        ):
+            rng = check_random_state(self.random_state)
+            n_samples = y_arr.shape[0]
+
+            n_labeled = int(np.ceil(float(self.ssl_percentage_labeled) * n_samples))
+            n_labeled = max(1, min(n_samples, n_labeled))
+
+            perm = rng.permutation(n_samples)
+            labeled_idx = perm[:n_labeled]
+
+            y_ssl = np.full_like(y_arr, np.nan, dtype=np.float64)
+            y_ssl[labeled_idx] = y_arr[labeled_idx]
+            y_arr = y_ssl
+
+            self._pct_ssl_labeled_idx_ = np.sort(labeled_idx)
 
         self.ftest_level = self._resolve_ftest_level()
 
